@@ -1,3 +1,4 @@
+import re
 import pandas as pd
 from datetime import datetime
 import streamlit as st
@@ -205,6 +206,36 @@ except Exception as e:
 # =========================================================
 # ARAYÜZ
 # =========================================================
+st.markdown(
+    """
+    <style>
+    /* Sekmeler dar ekranlarda (telefon) kaydırma yerine alt satıra kaysın */
+    div[data-baseweb="tab-list"] {
+        flex-wrap: wrap !important;
+        gap: 4px;
+        row-gap: 6px;
+    }
+    button[data-baseweb="tab"] {
+        white-space: normal !important;
+        font-size: 13px;
+        padding: 8px 10px;
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+    @media (max-width: 480px) {
+        button[data-baseweb="tab"] {
+            font-size: 12px;
+            padding: 6px 8px;
+        }
+        button[data-baseweb="tab"] p {
+            font-size: 12px;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("🍽️ Yemek ve Geri Bildirim Sistemi")
 st.markdown("Görüşleriniz menüleri birlikte iyileştirmemiz için bizim çok değerli.")
 st.divider()
@@ -214,7 +245,7 @@ gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = datetime.today().strftime(TARIH_FORMAT)
 
 tab1, tab2, tab3 = st.tabs(
-    ["📅 Aylık Menü & Ön Oylama", "✅ Yemek Sonrası Değerlendirme", "💡 Menü Önerisi"]
+    ["📅 Ön Oylama", "✅ Değerlendirme", "💡 Öneri"]
 )
 
 # --- TAB 1: Aylık Menü & Ön Oylama ---
@@ -457,23 +488,86 @@ with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
 
     # --- Raporlar ---
     with admin_tab2:
+        def _basliklari_onar(worksheet, beklenen_kolonlar):
+            """Sayfanın 1. satırındaki başlık etiketlerini kodun beklediği
+            kanonik isimlerle değiştirir. Veriler sütunlara pozisyonel olarak
+            (A, B, C... sırasına göre) yazıldığı için bu işlem mevcut veriyi
+            BOZMAZ; sadece yanlış/eski başlık metnini düzeltir. Beklenenden
+            fazla (kullanılmayan) başlık sütunu varsa temizler."""
+            mevcut_degerler = worksheet.get_all_values()
+            mevcut_sutun_sayisi = len(mevcut_degerler[0]) if mevcut_degerler else 0
+            yeni_baslik_satiri = list(beklenen_kolonlar)
+            if mevcut_sutun_sayisi > len(beklenen_kolonlar):
+                yeni_baslik_satiri += [""] * (mevcut_sutun_sayisi - len(beklenen_kolonlar))
+            worksheet.update("A1", [yeni_baslik_satiri])
+
+        with st.expander("🛠️ Sayfa Başlıklarını Onar", expanded=False):
+            st.caption(
+                "Eğer yukarıda 'beklenen sütun bulunamadı' uyarısı görüyorsan, "
+                "bu genellikle sayfanın 1. satırındaki başlık etiketlerinin eski/yanlış "
+                "olmasından kaynaklanır. Aşağıdaki buton **veriyi bozmadan**, sadece "
+                "başlık satırını kodun beklediği doğru isimlerle değiştirir."
+            )
+            if st.button("🛠️ Tüm Sayfaların Başlıklarını Onar"):
+                try:
+                    _basliklari_onar(ws_on, ["Tarih", "Degerlendirme", "KayitZamani"])
+                    _basliklari_onar(
+                        ws_son,
+                        ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"],
+                    )
+                    _basliklari_onar(ws_oneri, ["Tarih", "Oneri", "KayitZamani"])
+                    df_oku.clear()
+                    st.success("Başlıklar onarıldı! Sayfa yenileniyor...")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Başlıklar onarılırken hata oluştu: {e}")
+
+        def _sutun_normalize(s: str) -> str:
+            """Türkçe karakterleri, boşlukları ve büyük/küçük harf farkını
+            yok sayarak karşılaştırma yapabilmek için bir sütun adını sadeleştirir.
+            Örn: 'Değerlendirme', 'DEĞERLENDİRME ', 'değerlendirme' -> 'degerlendirme'"""
+            s = str(s).strip().lower()
+            donusum = {
+                "ı": "i", "i̇": "i", "İ": "i",
+                "ğ": "g", "ü": "u", "ş": "s", "ö": "o", "ç": "c",
+            }
+            for eski, yeni in donusum.items():
+                s = s.replace(eski, yeni)
+            return re.sub(r"[^a-z0-9]", "", s)
+
         def beklenen_sutunlari_garanti_et(df, beklenen_kolonlar, sayfa_adi):
             """Sheet'teki gerçek başlıklar kodun beklediğiyle birebir uyuşmuyorsa
-            (fazladan/eksik boşluk, farklı yazım, sıra değişikliği vb.) KeyError
-            yerine kullanıcıya hangi sütunun sorunlu olduğunu gösterir ve eksik
-            sütunları boş olarak ekler ki uygulama çökmesin."""
+            (fazladan/eksik boşluk, Türkçe karakter farkı, farklı büyük/küçük harf vb.)
+            önce normalize ederek eşleştirmeyi dener ve gerçek sütunu beklenen isme
+            yeniden adlandırır. Yine de bulunamayan sütunlar için KeyError yerine
+            kullanıcıya net bir uyarı gösterir ve boş sütun ekleyerek çökmeyi önler."""
             if df.empty:
                 return df
-            eksikler = [k for k in beklenen_kolonlar if k not in df.columns]
-            if eksikler:
+
+            gercek_norm_harita = {_sutun_normalize(c): c for c in df.columns}
+            yeniden_adlandir = {}
+            hala_eksik = []
+            for beklenen in beklenen_kolonlar:
+                if beklenen in df.columns:
+                    continue
+                norm = _sutun_normalize(beklenen)
+                if norm in gercek_norm_harita:
+                    yeniden_adlandir[gercek_norm_harita[norm]] = beklenen
+                else:
+                    hala_eksik.append(beklenen)
+
+            if yeniden_adlandir:
+                df = df.rename(columns=yeniden_adlandir)
+
+            if hala_eksik:
                 st.warning(
                     f"⚠️ **{sayfa_adi}** sayfasında beklenen sütun(lar) bulunamadı: "
-                    f"{', '.join(eksikler)}. Google Sheet'teki başlık satırını kontrol et "
-                    f"(fazladan boşluk, farklı yazım veya eksik hücre olabilir)."
+                    f"{', '.join(hala_eksik)}. Google Sheet'teki başlık satırını kontrol et "
+                    f"(farklı bir isim kullanılmış ya da hücre boş olabilir)."
                 )
                 with st.expander(f"'{sayfa_adi}' sayfasında bulunan gerçek sütunlar"):
                     st.write(list(df.columns))
-                for k in eksikler:
+                for k in hala_eksik:
                     df[k] = ""
             return df
 
