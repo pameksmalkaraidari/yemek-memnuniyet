@@ -1,6 +1,7 @@
 import re
 import pandas as pd
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -35,6 +36,14 @@ WS_SON = "SonDegerlendirme"
 WS_ONERI = "MenuOneri"
 
 TARIH_FORMAT = "%d.%m.%Y"
+TR_TZ = ZoneInfo("Europe/Istanbul")
+
+
+def simdi_tr() -> datetime:
+    """Sunucu hangi saat diliminde çalışırsa çalışsın, her zaman İstanbul
+    yerel saatini döndürür. 'Bugün' hesaplamalarında tutarlılık için tüm
+    tarih/saat işlemleri bu fonksiyon üzerinden yapılmalı."""
+    return datetime.now(TR_TZ)
 
 
 @st.cache_resource(show_spinner=False)
@@ -163,7 +172,7 @@ def gemo_sablonunu_ayikla(raw: pd.DataFrame) -> pd.DataFrame:
 def bugunun_menusu(df_menu: pd.DataFrame):
     if df_menu.empty or "Tarih" not in df_menu.columns:
         return None
-    bugun = datetime.today().strftime(TARIH_FORMAT)
+    bugun = simdi_tr().strftime(TARIH_FORMAT)
     eslesen = df_menu[df_menu["Tarih"] == bugun]
     if eslesen.empty:
         return None
@@ -264,7 +273,7 @@ st.divider()
 
 df_menu = df_oku(ws_menu, WS_MENU)
 gunun_menusu = bugunun_menusu(df_menu)
-bugun_str = datetime.today().strftime(TARIH_FORMAT)
+bugun_str = simdi_tr().strftime(TARIH_FORMAT)
 
 tab_degerlendirme, tab_on_oylama, tab3 = st.tabs(
     ["✅ Değerlendirme", "📅 Ön Oylama", "💡 Öneri"]
@@ -281,6 +290,11 @@ with tab_on_oylama:
             df_menu_sirali["Tarih"], format=TARIH_FORMAT, errors="coerce"
         )
         df_menu_sirali = df_menu_sirali.sort_values("_siralama").reset_index(drop=True)
+
+        # Geçmişte kalan günleri (bugünden önceki) oylamadan çıkar
+        bugun_tarihi = pd.to_datetime(bugun_str, format=TARIH_FORMAT)
+        df_menu_sirali = df_menu_sirali[df_menu_sirali["_siralama"] >= bugun_tarihi].reset_index(drop=True)
+
         gun_listesi = df_menu_sirali["Tarih"].tolist()
 
         if "on_oylama_indeks" not in st.session_state:
@@ -310,7 +324,7 @@ with tab_on_oylama:
 
             def _oy_kaydet_ve_ilerle(tarih, deger):
                 try:
-                    satir_ekle(ws_on, [tarih, deger, datetime.now().strftime("%d.%m.%Y %H:%M:%S")])
+                    satir_ekle(ws_on, [tarih, deger, simdi_tr().strftime("%d.%m.%Y %H:%M:%S")])
                     st.session_state.on_oylama_indeks += 1
                     st.rerun()
                 except Exception as e:
@@ -381,7 +395,7 @@ with tab_degerlendirme:
                 st.warning("Kötü olarak işaretlediğin ürün(ler) için lütfen kısa bir açıklama yaz.")
             else:
                 try:
-                    zaman = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                    zaman = simdi_tr().strftime("%d.%m.%Y %H:%M:%S")
                     for kolon in urun_kolonlari:
                         satir_ekle(
                             ws_son,
@@ -412,7 +426,7 @@ with tab3:
                 try:
                     satir_ekle(
                         ws_oneri,
-                        [bugun_str, oneri_metni, datetime.now().strftime("%d.%m.%Y %H:%M:%S")],
+                        [bugun_str, oneri_metni, simdi_tr().strftime("%d.%m.%Y %H:%M:%S")],
                     )
                     st.success("Teşekkürler! Önerin kaydedildi.")
                 except Exception as e:
@@ -670,7 +684,7 @@ if yonetici_erisimi:
                         st.download_button(
                             "⬇️ Kötü Değerlendirmeleri CSV Olarak İndir",
                             data=csv_kotu,
-                            file_name=f"kotu_degerlendirmeler_{datetime.today().strftime('%d_%m_%Y')}.csv",
+                            file_name=f"kotu_degerlendirmeler_{simdi_tr().strftime('%d_%m_%Y')}.csv",
                             mime="text/csv",
                         )
 
