@@ -276,7 +276,7 @@ gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = simdi_tr().strftime(TARIH_FORMAT)
 
 tab_degerlendirme, tab_on_oylama, tab3 = st.tabs(
-    ["✅ Değerlendirme", "📅 Ön Oylama", "💡 Öneri"]
+    ["✅ Değerlendirme", "📅 Ön Oylama", "💡 Dilek-Şikâyet-Öneri"]
 )
 
 # --- TAB 1: Aylık Menü & Ön Oylama ---
@@ -414,11 +414,11 @@ with tab_degerlendirme:
 
 # --- TAB 3: Menü Önerisi ---
 with tab3:
-    st.subheader("Menü Önerin Var mı?")
+    st.subheader("Menü Önerin Var mı?""Herhangi bir konuda şikâyetin var mı?)
     with st.form("oneri_form"):
         oneri_metni = st.text_area(
             "Önerini yaz:",
-            placeholder="Örn: Ayda bir kere mercimek köftesi olabilir...",
+            placeholder="Örn: Ayda bir kere mercimek köftesi olabilir veya yemekte herhangi bir cisim çıktı gibi",
         )
         oneri_submit = st.form_submit_button("Öneriyi Gönder")
         if oneri_submit:
