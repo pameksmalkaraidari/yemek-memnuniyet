@@ -170,6 +170,21 @@ def bugunun_menusu(df_menu: pd.DataFrame):
     return eslesen.iloc[0]
 
 
+GUN_ADLARI_TR = [
+    "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar",
+]
+
+
+def gun_adi(tarih_str: str) -> str:
+    """'DD.MM.YYYY' formatındaki bir tarih metninden Türkçe gün adını döndürür.
+    Tarih ayrıştırılamazsa boş string döner."""
+    try:
+        tarih = datetime.strptime(tarih_str, TARIH_FORMAT)
+        return GUN_ADLARI_TR[tarih.weekday()]
+    except (ValueError, TypeError):
+        return ""
+
+
 # Bağlantıyı kur
 baglanti_hatasi = None
 spreadsheet = None
@@ -278,6 +293,7 @@ with tab1:
             secili_tarih = secili_satir["Tarih"]
 
             st.markdown(f"## {secili_tarih}")
+            st.caption(gun_adi(secili_tarih))
             for kolon in df_menu.columns:
                 if kolon != "Tarih" and str(secili_satir[kolon]).strip():
                     st.markdown(f"**{kolon}:** {secili_satir[kolon]}")
@@ -310,6 +326,7 @@ with tab1:
 # --- TAB 2: Yemek Sonrası Değerlendirme ---
 with tab2:
     st.subheader(f"Bugünkü Yemekler Nasıldı? — {bugun_str}")
+    st.caption(gun_adi(bugun_str))
 
     if gunun_menusu is None:
         st.info("Bugün için sisteme henüz bir menü girilmemiş.")
@@ -399,264 +416,267 @@ with tab3:
 # =========================================================
 # YÖNETİCİ PANELİ
 # =========================================================
-with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
+yonetici_erisimi = "admin" in st.query_params
 
-    if "admin_giris_yapildi" not in st.session_state:
-        st.session_state.admin_giris_yapildi = False
+if yonetici_erisimi:
+    with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
 
-    if not st.session_state.admin_giris_yapildi:
-        girilen_sifre = st.text_input("Yönetici Şifresi", type="password", key="admin_sifre_girisi")
-        if st.button("Giriş Yap"):
-            if girilen_sifre == st.secrets.get("admin_sifre", None):
-                st.session_state.admin_giris_yapildi = True
-                st.rerun()
-            else:
-                st.error("Şifre hatalı.")
-        st.stop()
-
-    cikis_col = st.columns([4, 1])[1]
-    with cikis_col:
-        if st.button("Çıkış Yap"):
+        if "admin_giris_yapildi" not in st.session_state:
             st.session_state.admin_giris_yapildi = False
-            st.rerun()
 
-    admin_tab1, admin_tab2 = st.tabs(["📤 Aylık Menü Yükle", "📊 Raporlar"])
-
-    # --- Menü Yükleme ---
-    with admin_tab1:
-        st.markdown(
-            "GEMO Gıda'nın haftalık ızgara formatındaki Excel dosyasını olduğu gibi "
-            "yükleyebilirsin (gün sütunları, altında çorba/ana yemek/yardımcı/içecek "
-            "satırları). Ayrıca düz bir **Tarih** sütunlu CSV de kabul edilir. "
-            "Yüklediğinde mevcut menünün **tamamen üzerine yazılır**."
-        )
-        yuklenen_dosya = st.file_uploader(
-            "Aylık menü dosyasını seç", type=["csv", "xlsx", "xls"]
-        )
-
-        yeni_menu_df = None
-
-        if yuklenen_dosya is not None:
-            try:
-                if yuklenen_dosya.name.endswith(".csv"):
-                    yeni_menu_df = pd.read_csv(yuklenen_dosya)
-                    if "Tarih" not in yeni_menu_df.columns:
-                        st.error("Dosyada 'Tarih' adında bir sütun bulunamadı.")
-                        yeni_menu_df = None
-                else:
-                    excel_dosyasi = pd.ExcelFile(yuklenen_dosya)
-                    sayfa_secimi = st.selectbox(
-                        "Hangi sayfayı içe aktarmak istiyorsun?",
-                        excel_dosyasi.sheet_names,
-                    )
-                    ham_veri = excel_dosyasi.parse(sayfa_secimi, header=None)
-
-                    # Önce GEMO ızgara şablonu olarak dene
-                    ayiklanan = gemo_sablonunu_ayikla(ham_veri)
-
-                    if not ayiklanan.empty:
-                        yeni_menu_df = ayiklanan
-                        st.success(
-                            f"Şablon otomatik tanındı — {len(ayiklanan)} günlük menü tespit edildi."
-                        )
-                    else:
-                        # Şablon tanınmazsa düz tablo (ilk satır başlık) olarak dene
-                        duz_deneme = excel_dosyasi.parse(sayfa_secimi)
-                        if "Tarih" in duz_deneme.columns:
-                            yeni_menu_df = duz_deneme
-                        else:
-                            st.error(
-                                "Bu sayfadan menü tespit edilemedi. Format farklı olabilir "
-                                "veya sayfa boş/kalori listesi gibi başka bir içerik olabilir."
-                            )
-
-                if yeni_menu_df is not None:
-                    st.markdown("**Önizleme:**")
-                    st.dataframe(yeni_menu_df, use_container_width=True)
-
-                    if st.button("📤 Menüyü Sisteme Yükle (Üzerine Yazar)"):
-                        menuyu_yukle(ws_menu, yeni_menu_df)
-                        st.success("Menü başarıyla yüklendi!")
-                        st.rerun()
-            except Exception as e:
-                st.error(f"Dosya okunurken hata oluştu: {e}")
-
-        if not df_menu.empty:
-            st.divider()
-            st.markdown("**Sistemde şu anda kayıtlı menü:**")
-            st.dataframe(df_menu, use_container_width=True)
-
-    # --- Raporlar ---
-    with admin_tab2:
-        def _basliklari_onar(worksheet, beklenen_kolonlar):
-            """Sayfanın 1. satırındaki başlık etiketlerini kodun beklediği
-            kanonik isimlerle değiştirir. Veriler sütunlara pozisyonel olarak
-            (A, B, C... sırasına göre) yazıldığı için bu işlem mevcut veriyi
-            BOZMAZ; sadece yanlış/eski başlık metnini düzeltir. Beklenenden
-            fazla (kullanılmayan) başlık sütunu varsa temizler."""
-            mevcut_degerler = worksheet.get_all_values()
-            mevcut_sutun_sayisi = len(mevcut_degerler[0]) if mevcut_degerler else 0
-            yeni_baslik_satiri = list(beklenen_kolonlar)
-            if mevcut_sutun_sayisi > len(beklenen_kolonlar):
-                yeni_baslik_satiri += [""] * (mevcut_sutun_sayisi - len(beklenen_kolonlar))
-            worksheet.update("A1", [yeni_baslik_satiri])
-
-        with st.expander("🛠️ Sayfa Başlıklarını Onar", expanded=False):
-            st.caption(
-                "Eğer yukarıda 'beklenen sütun bulunamadı' uyarısı görüyorsan, "
-                "bu genellikle sayfanın 1. satırındaki başlık etiketlerinin eski/yanlış "
-                "olmasından kaynaklanır. Aşağıdaki buton **veriyi bozmadan**, sadece "
-                "başlık satırını kodun beklediği doğru isimlerle değiştirir."
-            )
-            if st.button("🛠️ Tüm Sayfaların Başlıklarını Onar"):
-                try:
-                    _basliklari_onar(ws_on, ["Tarih", "Degerlendirme", "KayitZamani"])
-                    _basliklari_onar(
-                        ws_son,
-                        ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"],
-                    )
-                    _basliklari_onar(ws_oneri, ["Tarih", "Oneri", "KayitZamani"])
-                    df_oku.clear()
-                    st.success("Başlıklar onarıldı! Sayfa yenileniyor...")
+        if not st.session_state.admin_giris_yapildi:
+            girilen_sifre = st.text_input("Yönetici Şifresi", type="password", key="admin_sifre_girisi")
+            if st.button("Giriş Yap"):
+                if girilen_sifre == st.secrets.get("admin_sifre", None):
+                    st.session_state.admin_giris_yapildi = True
                     st.rerun()
+                else:
+                    st.error("Şifre hatalı.")
+            st.stop()
+
+        cikis_col = st.columns([4, 1])[1]
+        with cikis_col:
+            if st.button("Çıkış Yap"):
+                st.session_state.admin_giris_yapildi = False
+                st.rerun()
+
+        admin_tab1, admin_tab2 = st.tabs(["📤 Aylık Menü Yükle", "📊 Raporlar"])
+
+        # --- Menü Yükleme ---
+        with admin_tab1:
+            st.markdown(
+                "GEMO Gıda'nın haftalık ızgara formatındaki Excel dosyasını olduğu gibi "
+                "yükleyebilirsin (gün sütunları, altında çorba/ana yemek/yardımcı/içecek "
+                "satırları). Ayrıca düz bir **Tarih** sütunlu CSV de kabul edilir. "
+                "Yüklediğinde mevcut menünün **tamamen üzerine yazılır**."
+            )
+            yuklenen_dosya = st.file_uploader(
+                "Aylık menü dosyasını seç", type=["csv", "xlsx", "xls"]
+            )
+
+            yeni_menu_df = None
+
+            if yuklenen_dosya is not None:
+                try:
+                    if yuklenen_dosya.name.endswith(".csv"):
+                        yeni_menu_df = pd.read_csv(yuklenen_dosya)
+                        if "Tarih" not in yeni_menu_df.columns:
+                            st.error("Dosyada 'Tarih' adında bir sütun bulunamadı.")
+                            yeni_menu_df = None
+                    else:
+                        excel_dosyasi = pd.ExcelFile(yuklenen_dosya)
+                        sayfa_secimi = st.selectbox(
+                            "Hangi sayfayı içe aktarmak istiyorsun?",
+                            excel_dosyasi.sheet_names,
+                        )
+                        ham_veri = excel_dosyasi.parse(sayfa_secimi, header=None)
+
+                        # Önce GEMO ızgara şablonu olarak dene
+                        ayiklanan = gemo_sablonunu_ayikla(ham_veri)
+
+                        if not ayiklanan.empty:
+                            yeni_menu_df = ayiklanan
+                            st.success(
+                                f"Şablon otomatik tanındı — {len(ayiklanan)} günlük menü tespit edildi."
+                            )
+                        else:
+                            # Şablon tanınmazsa düz tablo (ilk satır başlık) olarak dene
+                            duz_deneme = excel_dosyasi.parse(sayfa_secimi)
+                            if "Tarih" in duz_deneme.columns:
+                                yeni_menu_df = duz_deneme
+                            else:
+                                st.error(
+                                    "Bu sayfadan menü tespit edilemedi. Format farklı olabilir "
+                                    "veya sayfa boş/kalori listesi gibi başka bir içerik olabilir."
+                                )
+
+                    if yeni_menu_df is not None:
+                        st.markdown("**Önizleme:**")
+                        st.dataframe(yeni_menu_df, use_container_width=True)
+
+                        if st.button("📤 Menüyü Sisteme Yükle (Üzerine Yazar)"):
+                            menuyu_yukle(ws_menu, yeni_menu_df)
+                            st.success("Menü başarıyla yüklendi!")
+                            st.rerun()
                 except Exception as e:
-                    st.error(f"Başlıklar onarılırken hata oluştu: {e}")
+                    st.error(f"Dosya okunurken hata oluştu: {e}")
 
-        def _sutun_normalize(s: str) -> str:
-            """Türkçe karakterleri, boşlukları ve büyük/küçük harf farkını
-            yok sayarak karşılaştırma yapabilmek için bir sütun adını sadeleştirir.
-            Örn: 'Değerlendirme', 'DEĞERLENDİRME ', 'değerlendirme' -> 'degerlendirme'"""
-            s = str(s).strip().lower()
-            donusum = {
-                "ı": "i", "i̇": "i", "İ": "i",
-                "ğ": "g", "ü": "u", "ş": "s", "ö": "o", "ç": "c",
-            }
-            for eski, yeni in donusum.items():
-                s = s.replace(eski, yeni)
-            return re.sub(r"[^a-z0-9]", "", s)
+            if not df_menu.empty:
+                st.divider()
+                st.markdown("**Sistemde şu anda kayıtlı menü:**")
+                st.dataframe(df_menu, use_container_width=True)
 
-        def beklenen_sutunlari_garanti_et(df, beklenen_kolonlar, sayfa_adi):
-            """Sheet'teki gerçek başlıklar kodun beklediğiyle birebir uyuşmuyorsa
-            (fazladan/eksik boşluk, Türkçe karakter farkı, farklı büyük/küçük harf vb.)
-            önce normalize ederek eşleştirmeyi dener ve gerçek sütunu beklenen isme
-            yeniden adlandırır. Yine de bulunamayan sütunlar için KeyError yerine
-            kullanıcıya net bir uyarı gösterir ve boş sütun ekleyerek çökmeyi önler."""
-            if df.empty:
+        # --- Raporlar ---
+        with admin_tab2:
+            def _basliklari_onar(worksheet, beklenen_kolonlar):
+                """Sayfanın 1. satırındaki başlık etiketlerini kodun beklediği
+                kanonik isimlerle değiştirir. Veriler sütunlara pozisyonel olarak
+                (A, B, C... sırasına göre) yazıldığı için bu işlem mevcut veriyi
+                BOZMAZ; sadece yanlış/eski başlık metnini düzeltir. Beklenenden
+                fazla (kullanılmayan) başlık sütunu varsa temizler."""
+                mevcut_degerler = worksheet.get_all_values()
+                mevcut_sutun_sayisi = len(mevcut_degerler[0]) if mevcut_degerler else 0
+                yeni_baslik_satiri = list(beklenen_kolonlar)
+                if mevcut_sutun_sayisi > len(beklenen_kolonlar):
+                    yeni_baslik_satiri += [""] * (mevcut_sutun_sayisi - len(beklenen_kolonlar))
+                worksheet.update("A1", [yeni_baslik_satiri])
+
+            with st.expander("🛠️ Sayfa Başlıklarını Onar", expanded=False):
+                st.caption(
+                    "Eğer yukarıda 'beklenen sütun bulunamadı' uyarısı görüyorsan, "
+                    "bu genellikle sayfanın 1. satırındaki başlık etiketlerinin eski/yanlış "
+                    "olmasından kaynaklanır. Aşağıdaki buton **veriyi bozmadan**, sadece "
+                    "başlık satırını kodun beklediği doğru isimlerle değiştirir."
+                )
+                if st.button("🛠️ Tüm Sayfaların Başlıklarını Onar"):
+                    try:
+                        _basliklari_onar(ws_on, ["Tarih", "Degerlendirme", "KayitZamani"])
+                        _basliklari_onar(
+                            ws_son,
+                            ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"],
+                        )
+                        _basliklari_onar(ws_oneri, ["Tarih", "Oneri", "KayitZamani"])
+                        df_oku.clear()
+                        st.success("Başlıklar onarıldı! Sayfa yenileniyor...")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Başlıklar onarılırken hata oluştu: {e}")
+
+            def _sutun_normalize(s: str) -> str:
+                """Türkçe karakterleri, boşlukları ve büyük/küçük harf farkını
+                yok sayarak karşılaştırma yapabilmek için bir sütun adını sadeleştirir.
+                Örn: 'Değerlendirme', 'DEĞERLENDİRME ', 'değerlendirme' -> 'degerlendirme'"""
+                s = str(s).strip().lower()
+                donusum = {
+                    "ı": "i", "i̇": "i", "İ": "i",
+                    "ğ": "g", "ü": "u", "ş": "s", "ö": "o", "ç": "c",
+                }
+                for eski, yeni in donusum.items():
+                    s = s.replace(eski, yeni)
+                return re.sub(r"[^a-z0-9]", "", s)
+
+            def beklenen_sutunlari_garanti_et(df, beklenen_kolonlar, sayfa_adi):
+                """Sheet'teki gerçek başlıklar kodun beklediğiyle birebir uyuşmuyorsa
+                (fazladan/eksik boşluk, Türkçe karakter farkı, farklı büyük/küçük harf vb.)
+                önce normalize ederek eşleştirmeyi dener ve gerçek sütunu beklenen isme
+                yeniden adlandırır. Yine de bulunamayan sütunlar için KeyError yerine
+                kullanıcıya net bir uyarı gösterir ve boş sütun ekleyerek çökmeyi önler."""
+                if df.empty:
+                    return df
+
+                gercek_norm_harita = {_sutun_normalize(c): c for c in df.columns}
+                yeniden_adlandir = {}
+                hala_eksik = []
+                for beklenen in beklenen_kolonlar:
+                    if beklenen in df.columns:
+                        continue
+                    norm = _sutun_normalize(beklenen)
+                    if norm in gercek_norm_harita:
+                        yeniden_adlandir[gercek_norm_harita[norm]] = beklenen
+                    else:
+                        hala_eksik.append(beklenen)
+
+                if yeniden_adlandir:
+                    df = df.rename(columns=yeniden_adlandir)
+
+                if hala_eksik:
+                    st.warning(
+                        f"⚠️ **{sayfa_adi}** sayfasında beklenen sütun(lar) bulunamadı: "
+                        f"{', '.join(hala_eksik)}. Google Sheet'teki başlık satırını kontrol et "
+                        f"(farklı bir isim kullanılmış ya da hücre boş olabilir)."
+                    )
+                    with st.expander(f"'{sayfa_adi}' sayfasında bulunan gerçek sütunlar"):
+                        st.write(list(df.columns))
+                    for k in hala_eksik:
+                        df[k] = ""
                 return df
 
-            gercek_norm_harita = {_sutun_normalize(c): c for c in df.columns}
-            yeniden_adlandir = {}
-            hala_eksik = []
-            for beklenen in beklenen_kolonlar:
-                if beklenen in df.columns:
-                    continue
-                norm = _sutun_normalize(beklenen)
-                if norm in gercek_norm_harita:
-                    yeniden_adlandir[gercek_norm_harita[norm]] = beklenen
-                else:
-                    hala_eksik.append(beklenen)
-
-            if yeniden_adlandir:
-                df = df.rename(columns=yeniden_adlandir)
-
-            if hala_eksik:
-                st.warning(
-                    f"⚠️ **{sayfa_adi}** sayfasında beklenen sütun(lar) bulunamadı: "
-                    f"{', '.join(hala_eksik)}. Google Sheet'teki başlık satırını kontrol et "
-                    f"(farklı bir isim kullanılmış ya da hücre boş olabilir)."
-                )
-                with st.expander(f"'{sayfa_adi}' sayfasında bulunan gerçek sütunlar"):
-                    st.write(list(df.columns))
-                for k in hala_eksik:
-                    df[k] = ""
-            return df
-
-        df_on = beklenen_sutunlari_garanti_et(
-            df_oku(ws_on, WS_ON), ["Tarih", "Degerlendirme", "KayitZamani"], WS_ON
-        )
-        df_son = beklenen_sutunlari_garanti_et(
-            df_oku(ws_son, WS_SON),
-            ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"],
-            WS_SON,
-        )
-        df_oneri = beklenen_sutunlari_garanti_et(
-            df_oku(ws_oneri, WS_ONERI), ["Tarih", "Oneri", "KayitZamani"], WS_ONERI
-        )
-
-        if df_on.empty and df_son.empty:
-            st.info("Henüz hiç oylama verisi yok.")
-        else:
-            st.markdown("### 📊 Özet")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Ön Oylama Sayısı", len(df_on))
-            iyi_orani = (
-                (df_on["Degerlendirme"] == "İyi").mean() * 100 if not df_on.empty else 0
+            df_on = beklenen_sutunlari_garanti_et(
+                df_oku(ws_on, WS_ON), ["Tarih", "Degerlendirme", "KayitZamani"], WS_ON
             )
-            m2.metric("Ön Oylama İyi Oranı", f"%{iyi_orani:.0f}" if not df_on.empty else "—")
-            m3.metric("Toplam Ürün Değerlendirmesi", len(df_son))
-            kotu_orani = (
-                (df_son["Degerlendirme"] == "Kötü").mean() * 100 if not df_son.empty else 0
+            df_son = beklenen_sutunlari_garanti_et(
+                df_oku(ws_son, WS_SON),
+                ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"],
+                WS_SON,
             )
-            m4.metric("Kötü Oranı", f"%{kotu_orani:.0f}" if not df_son.empty else "—")
+            df_oneri = beklenen_sutunlari_garanti_et(
+                df_oku(ws_oneri, WS_ONERI), ["Tarih", "Oneri", "KayitZamani"], WS_ONERI
+            )
 
-            st.divider()
-            st.markdown("### 📈 Ön Oylama Trend (Zaman İçinde İyi Oranı)")
-            if not df_on.empty:
-                on_ort = df_on.groupby("Tarih")["Degerlendirme"].apply(
-                    lambda x: (x == "İyi").mean() * 100
-                )
-                on_ort.index = pd.to_datetime(on_ort.index, format=TARIH_FORMAT, errors="coerce")
-                st.line_chart(on_ort.sort_index())
+            if df_on.empty and df_son.empty:
+                st.info("Henüz hiç oylama verisi yok.")
             else:
-                st.info("Henüz ön oylama verisi yok.")
-
-            st.divider()
-            st.markdown("### 🍽️ Ürün Bazında Dağılım (Yemek Sonrası)")
-            if df_son.empty:
-                st.info("Henüz ürün değerlendirmesi yok.")
-            else:
-                pivot = df_son.pivot_table(
-                    index="Kalem", columns="Degerlendirme", values="Tarih",
-                    aggfunc="count", fill_value=0,
+                st.markdown("### 📊 Özet")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Ön Oylama Sayısı", len(df_on))
+                iyi_orani = (
+                    (df_on["Degerlendirme"] == "İyi").mean() * 100 if not df_on.empty else 0
                 )
-                for sutun in ["Güzel", "Orta", "Kötü"]:
-                    if sutun not in pivot.columns:
-                        pivot[sutun] = 0
-                pivot = pivot[["Güzel", "Orta", "Kötü"]]
-                st.bar_chart(pivot)
+                m2.metric("Ön Oylama İyi Oranı", f"%{iyi_orani:.0f}" if not df_on.empty else "—")
+                m3.metric("Toplam Ürün Değerlendirmesi", len(df_son))
+                kotu_orani = (
+                    (df_son["Degerlendirme"] == "Kötü").mean() * 100 if not df_son.empty else 0
+                )
+                m4.metric("Kötü Oranı", f"%{kotu_orani:.0f}" if not df_son.empty else "—")
 
                 st.divider()
-                st.markdown("### ⚠️ Kötü Değerlendirmeler ve Açıklamalar")
-                kotuler = df_son[df_son["Degerlendirme"] == "Kötü"]
-                if kotuler.empty:
-                    st.success("Kötü olarak işaretlenen ürün yok.")
+                st.markdown("### 📈 Ön Oylama Trend (Zaman İçinde İyi Oranı)")
+                if not df_on.empty:
+                    on_ort = df_on.groupby("Tarih")["Degerlendirme"].apply(
+                        lambda x: (x == "İyi").mean() * 100
+                    )
+                    on_ort.index = pd.to_datetime(on_ort.index, format=TARIH_FORMAT, errors="coerce")
+                    st.line_chart(on_ort.sort_index())
+                else:
+                    st.info("Henüz ön oylama verisi yok.")
+
+                st.divider()
+                st.markdown("### 🍽️ Ürün Bazında Dağılım (Yemek Sonrası)")
+                if df_son.empty:
+                    st.info("Henüz ürün değerlendirmesi yok.")
+                else:
+                    pivot = df_son.pivot_table(
+                        index="Kalem", columns="Degerlendirme", values="Tarih",
+                        aggfunc="count", fill_value=0,
+                    )
+                    for sutun in ["Güzel", "Orta", "Kötü"]:
+                        if sutun not in pivot.columns:
+                            pivot[sutun] = 0
+                    pivot = pivot[["Güzel", "Orta", "Kötü"]]
+                    st.bar_chart(pivot)
+
+                    st.divider()
+                    st.markdown("### ⚠️ Kötü Değerlendirmeler ve Açıklamalar")
+                    kotuler = df_son[df_son["Degerlendirme"] == "Kötü"]
+                    if kotuler.empty:
+                        st.success("Kötü olarak işaretlenen ürün yok.")
+                    else:
+                        st.dataframe(
+                            kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]]
+                            .sort_values("Tarih", ascending=False),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        csv_kotu = kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]].to_csv(
+                            index=False
+                        ).encode("utf-8-sig")
+                        st.download_button(
+                            "⬇️ Kötü Değerlendirmeleri CSV Olarak İndir",
+                            data=csv_kotu,
+                            file_name=f"kotu_degerlendirmeler_{datetime.today().strftime('%d_%m_%Y')}.csv",
+                            mime="text/csv",
+                        )
+
+                st.divider()
+                st.markdown("### 💡 Menü Önerileri")
+                if df_oneri.empty:
+                    st.info("Henüz öneri yok.")
                 else:
                     st.dataframe(
-                        kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]]
-                        .sort_values("Tarih", ascending=False),
+                        df_oneri[["Tarih", "Oneri"]].sort_values("Tarih", ascending=False),
                         use_container_width=True,
-                        hide_index=True,
-                    )
-                    csv_kotu = kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]].to_csv(
-                        index=False
-                    ).encode("utf-8-sig")
-                    st.download_button(
-                        "⬇️ Kötü Değerlendirmeleri CSV Olarak İndir",
-                        data=csv_kotu,
-                        file_name=f"kotu_degerlendirmeler_{datetime.today().strftime('%d_%m_%Y')}.csv",
-                        mime="text/csv",
                     )
 
-            st.divider()
-            st.markdown("### 💡 Menü Önerileri")
-            if df_oneri.empty:
-                st.info("Henüz öneri yok.")
-            else:
-                st.dataframe(
-                    df_oneri[["Tarih", "Oneri"]].sort_values("Tarih", ascending=False),
-                    use_container_width=True,
-                )
-
-            st.divider()
-            if st.button("🔄 Verileri Yenile"):
-                st.rerun()
+                st.divider()
+                if st.button("🔄 Verileri Yenile"):
+                    st.rerun()
