@@ -46,22 +46,25 @@ def sheets_baglantisi_al():
     return spreadsheet
 
 
-def worksheet_al(spreadsheet, isim, kolonlar):
+@st.cache_resource(show_spinner=False)
+def worksheet_al(_spreadsheet, isim, kolonlar):
     try:
-        ws = spreadsheet.worksheet(isim)
+        ws = _spreadsheet.worksheet(isim)
     except gspread.exceptions.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=isim, rows=1000, cols=max(len(kolonlar), 5))
+        ws = _spreadsheet.add_worksheet(title=isim, rows=1000, cols=max(len(kolonlar), 5))
         ws.append_row(kolonlar)
     return ws
 
 
-def df_oku(worksheet) -> pd.DataFrame:
-    kayitlar = worksheet.get_all_records()
+@st.cache_data(ttl=60, show_spinner=False)
+def df_oku(_worksheet, worksheet_adi: str) -> pd.DataFrame:
+    kayitlar = _worksheet.get_all_records()
     return pd.DataFrame(kayitlar)
 
 
 def satir_ekle(worksheet, satir: list):
     worksheet.append_row(satir, value_input_option="USER_ENTERED")
+
 
 
 def menuyu_yukle(worksheet, df: pd.DataFrame):
@@ -72,6 +75,7 @@ def menuyu_yukle(worksheet, df: pd.DataFrame):
     df = df.fillna("").astype(str)
     worksheet.clear()
     worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+    df_oku.clear()
 
 
 def gemo_sablonunu_ayikla(raw: pd.DataFrame) -> pd.DataFrame:
@@ -138,10 +142,21 @@ if baglanti_hatasi:
         st.code(baglanti_hatasi)
     st.stop()
 
-ws_menu = worksheet_al(spreadsheet, WS_MENU, ["Tarih"])
-ws_on = worksheet_al(spreadsheet, WS_ON, ["Tarih", "Degerlendirme", "KayitZamani"])
-ws_son = worksheet_al(spreadsheet, WS_SON, ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"])
-ws_oneri = worksheet_al(spreadsheet, WS_ONERI, ["Tarih", "Oneri", "KayitZamani"])
+try:
+    ws_menu = worksheet_al(spreadsheet, WS_MENU, ["Tarih"])
+    ws_on = worksheet_al(spreadsheet, WS_ON, ["Tarih", "Degerlendirme", "KayitZamani"])
+    ws_son = worksheet_al(spreadsheet, WS_SON, ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"])
+    ws_oneri = worksheet_al(spreadsheet, WS_ONERI, ["Tarih", "Oneri", "KayitZamani"])
+except Exception as e:
+    st.error(
+        "⚠️ Google Sheets ile iletişimde bir sorun oluştu. Bu genellikle Google'ın "
+        "kısa süreli istek sınırına (rate limit) takılmaktan kaynaklanır — birkaç "
+        "saniye bekleyip sayfayı yenilemeyi dene. Sorun devam ederse şifreni ve "
+        "sheet paylaşım ayarlarını kontrol et."
+    )
+    with st.expander("Hata detayı"):
+        st.code(str(e))
+    st.stop()
 
 # =========================================================
 # ARAYÜZ
@@ -150,7 +165,7 @@ st.title("🍽️ Yemek ve Geri Bildirim Sistemi")
 st.markdown("Görüşleriniz menüleri birlikte iyileştirmemiz için bizim çok değerli.")
 st.divider()
 
-df_menu = df_oku(ws_menu)
+df_menu = df_oku(ws_menu, WS_MENU)
 gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = datetime.today().strftime(TARIH_FORMAT)
 
@@ -398,9 +413,9 @@ with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
 
     # --- Raporlar ---
     with admin_tab2:
-        df_on = df_oku(ws_on)
-        df_son = df_oku(ws_son)
-        df_oneri = df_oku(ws_oneri)
+        df_on = df_oku(ws_on, WS_ON)
+        df_son = df_oku(ws_son, WS_SON)
+        df_oneri = df_oku(ws_oneri, WS_ONERI)
 
         if df_on.empty and df_son.empty:
             st.info("Henüz hiç oylama verisi yok.")
