@@ -457,9 +457,37 @@ with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
 
     # --- Raporlar ---
     with admin_tab2:
-        df_on = df_oku(ws_on, WS_ON)
-        df_son = df_oku(ws_son, WS_SON)
-        df_oneri = df_oku(ws_oneri, WS_ONERI)
+        def beklenen_sutunlari_garanti_et(df, beklenen_kolonlar, sayfa_adi):
+            """Sheet'teki gerçek başlıklar kodun beklediğiyle birebir uyuşmuyorsa
+            (fazladan/eksik boşluk, farklı yazım, sıra değişikliği vb.) KeyError
+            yerine kullanıcıya hangi sütunun sorunlu olduğunu gösterir ve eksik
+            sütunları boş olarak ekler ki uygulama çökmesin."""
+            if df.empty:
+                return df
+            eksikler = [k for k in beklenen_kolonlar if k not in df.columns]
+            if eksikler:
+                st.warning(
+                    f"⚠️ **{sayfa_adi}** sayfasında beklenen sütun(lar) bulunamadı: "
+                    f"{', '.join(eksikler)}. Google Sheet'teki başlık satırını kontrol et "
+                    f"(fazladan boşluk, farklı yazım veya eksik hücre olabilir)."
+                )
+                with st.expander(f"'{sayfa_adi}' sayfasında bulunan gerçek sütunlar"):
+                    st.write(list(df.columns))
+                for k in eksikler:
+                    df[k] = ""
+            return df
+
+        df_on = beklenen_sutunlari_garanti_et(
+            df_oku(ws_on, WS_ON), ["Tarih", "Degerlendirme", "KayitZamani"], WS_ON
+        )
+        df_son = beklenen_sutunlari_garanti_et(
+            df_oku(ws_son, WS_SON),
+            ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"],
+            WS_SON,
+        )
+        df_oneri = beklenen_sutunlari_garanti_et(
+            df_oku(ws_oneri, WS_ONERI), ["Tarih", "Oneri", "KayitZamani"], WS_ONERI
+        )
 
         if df_on.empty and df_son.empty:
             st.info("Henüz hiç oylama verisi yok.")
