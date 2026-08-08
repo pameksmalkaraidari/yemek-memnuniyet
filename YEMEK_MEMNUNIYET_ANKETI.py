@@ -1,4 +1,7 @@
 import re
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -44,6 +47,87 @@ def simdi_tr() -> datetime:
     yerel saatini döndürür. 'Bugün' hesaplamalarında tutarlılık için tüm
     tarih/saat işlemleri bu fonksiyon üzerinden yapılmalı."""
     return datetime.now(TR_TZ)
+
+
+def mail_gonder(konu: str, govde_html: str):
+    """secrets.toml içindeki [email] ayarlarını kullanarak HTML gövdeli
+    bir e-posta gönderir. Ayarlar eksikse veya gönderim başarısız olursa
+    açıklayıcı bir hata fırlatır (çağıran taraf yakalayıp gösterir)."""
+    email_ayarlari = st.secrets.get("email", None)
+    if not email_ayarlari:
+        raise RuntimeError(
+            "secrets.toml içinde '[email]' bölümü bulunamadı. Lütfen gonderen_email, "
+            "gonderen_sifre, alici_epostalar, smtp_sunucu ve smtp_port ayarlarını ekle."
+        )
+
+    gonderen = email_ayarlari["gonderen_email"]
+    sifre = email_ayarlari["gonderen_sifre"]
+    aliciler = email_ayarlari["alici_epostalar"]
+    if isinstance(aliciler, str):
+        aliciler = [a.strip() for a in aliciler.split(",") if a.strip()]
+    smtp_sunucu = email_ayarlari.get("smtp_sunucu", "smtp.gmail.com")
+    smtp_port = int(email_ayarlari.get("smtp_port", 465))
+
+    mesaj = MIMEMultipart("alternative")
+    mesaj["Subject"] = konu
+    mesaj["From"] = gonderen
+    mesaj["To"] = ", ".join(aliciler)
+    mesaj.attach(MIMEText(govde_html, "html", "utf-8"))
+
+    with smtplib.SMTP_SSL(smtp_sunucu, smtp_port) as sunucu:
+        sunucu.login(gonderen, sifre)
+        sunucu.sendmail(gonderen, aliciler, mesaj.as_string())
+
+
+def gunluk_ozet_html(tarih_str: str, df_on: pd.DataFrame, df_son: pd.DataFrame, df_oneri: pd.DataFrame) -> str:
+    """Belirtilen tarih için ön oylama, ürün değerlendirmesi ve öneri
+    verilerinden sade bir HTML e-posta gövdesi üretir."""
+    gun = gun_adi(tarih_str)
+    parcalar = [f"<h2>🍽️ Günlük Yemek Raporu — {tarih_str} {gun}</h2>"]
+
+    # Ön oylama özeti
+    on_bugun = df_on[df_on["Tarih"] == tarih_str] if not df_on.empty and "Tarih" in df_on.columns else pd.DataFrame()
+    if on_bugun.empty:
+        parcalar.append("<p><b>Ön Oylama:</b> Bugün için ön oylama verisi yok.</p>")
+    else:
+        iyi = (on_bugun["Degerlendirme"] == "İyi").sum()
+        kotu = (on_bugun["Degerlendirme"] == "Kötü").sum()
+        toplam = len(on_bugun)
+        oran = (iyi / toplam * 100) if toplam else 0
+        parcalar.append(
+            f"<p><b>Ön Oylama:</b> {toplam} oy — 👍 {iyi} İyi, 👎 {kotu} Kötü "
+            f"(İyi oranı: %{oran:.0f})</p>"
+        )
+
+    # Ürün bazlı değerlendirme özeti
+    son_bugun = df_son[df_son["Tarih"] == tarih_str] if not df_son.empty and "Tarih" in df_son.columns else pd.DataFrame()
+    if son_bugun.empty:
+        parcalar.append("<p><b>Yemek Sonrası Değerlendirme:</b> Bugün için değerlendirme verisi yok.</p>")
+    else:
+        pivot = son_bugun.pivot_table(
+            index="Kalem", columns="Degerlendirme", values="Tarih", aggfunc="count", fill_value=0
+        )
+        for sutun in ["Güzel", "Orta", "Kötü"]:
+            if sutun not in pivot.columns:
+                pivot[sutun] = 0
+        pivot = pivot[["Güzel", "Orta", "Kötü"]]
+        parcalar.append("<p><b>Yemek Sonrası Değerlendirme:</b></p>")
+        parcalar.append(pivot.to_html(border=1))
+
+        kotuler = son_bugun[son_bugun["Degerlendirme"] == "Kötü"]
+        if not kotuler.empty:
+            parcalar.append("<p><b>⚠️ Kötü Değerlendirmeler:</b></p>")
+            parcalar.append(
+                kotuler[["Kalem", "UrunAdi", "Aciklama"]].to_html(index=False, border=1)
+            )
+
+    # Öneriler
+    oneri_bugun = df_oneri[df_oneri["Tarih"] == tarih_str] if not df_oneri.empty and "Tarih" in df_oneri.columns else pd.DataFrame()
+    if not oneri_bugun.empty:
+        parcalar.append("<p><b>💡 Bugünkü Menü Önerileri:</b></p>")
+        parcalar.append(oneri_bugun[["Oneri"]].to_html(index=False, border=1))
+
+    return "<br>".join(parcalar)
 
 
 @st.cache_resource(show_spinner=False)
@@ -357,7 +441,7 @@ with tab_degerlendirme:
             if k != "Tarih" and str(gunun_menusu[k]).strip()
         ]
 
-        st.markdown("Her ürünü ayrı ayrı değerlendir. **Kötü** olduğunu düşünüyorsan nedenini bize açıklar mısın? Bu bizim sorunu düzeltmemize yardımcı olacak.")
+        st.markdown("Her ürünü ayrı ayrı değerlendir. **Kötü** olduğunu düşünüyorsan nedenini bize açıklar mısın? Bu bizim sorunu düzeltmemize yardımcı olacaktır.")
         st.divider()
 
         degerlendirmeler = {}
@@ -697,6 +781,26 @@ if yonetici_erisimi:
                         df_oneri[["Tarih", "Oneri"]].sort_values("Tarih", ascending=False),
                         use_container_width=True,
                     )
+
+                st.divider()
+                st.markdown("### 📧 Günlük Raporu Mail Gönder")
+                gonderilecek_tarih = st.date_input(
+                    "Hangi günün raporu gönderilsin?",
+                    value=simdi_tr().date(),
+                    format="DD.MM.YYYY",
+                    key="mail_tarih_secimi",
+                )
+                gonderilecek_tarih_str = gonderilecek_tarih.strftime(TARIH_FORMAT)
+
+                if st.button("📧 Bu Günün Raporunu Mail Gönder"):
+                    try:
+                        govde = gunluk_ozet_html(gonderilecek_tarih_str, df_on, df_son, df_oneri)
+                        mail_gonder(
+                            f"🍽️ Günlük Yemek Raporu — {gonderilecek_tarih_str}", govde
+                        )
+                        st.success("Rapor e-posta ile gönderildi!")
+                    except Exception as e:
+                        st.error(f"Mail gönderilirken hata oluştu: {e}")
 
                 st.divider()
                 if st.button("🔄 Verileri Yenile"):
