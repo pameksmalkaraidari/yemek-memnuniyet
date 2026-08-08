@@ -246,6 +246,13 @@ st.markdown(
             font-size: 12px;
         }
     }
+    .gun-adi-etiket {
+        font-size: 17px;
+        font-weight: 700;
+        color: #444444;
+        margin-top: -8px;
+        margin-bottom: 4px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -259,12 +266,12 @@ df_menu = df_oku(ws_menu, WS_MENU)
 gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = datetime.today().strftime(TARIH_FORMAT)
 
-tab1, tab2, tab3 = st.tabs(
-    ["📅 Ön Oylama", "✅ Değerlendirme", "💡 Öneri"]
+tab_degerlendirme, tab_on_oylama, tab3 = st.tabs(
+    ["✅ Değerlendirme", "📅 Ön Oylama", "💡 Öneri"]
 )
 
 # --- TAB 1: Aylık Menü & Ön Oylama ---
-with tab1:
+with tab_on_oylama:
     if df_menu.empty:
         st.info("Sisteme henüz bir menü yüklenmemiş.")
     else:
@@ -293,7 +300,7 @@ with tab1:
             secili_tarih = secili_satir["Tarih"]
 
             st.markdown(f"## {secili_tarih}")
-            st.caption(gun_adi(secili_tarih))
+            st.markdown(f'<div class="gun-adi-etiket">📆 {gun_adi(secili_tarih)}</div>', unsafe_allow_html=True)
             for kolon in df_menu.columns:
                 if kolon != "Tarih" and str(secili_satir[kolon]).strip():
                     st.markdown(f"**{kolon}:** {secili_satir[kolon]}")
@@ -324,9 +331,9 @@ with tab1:
 
 
 # --- TAB 2: Yemek Sonrası Değerlendirme ---
-with tab2:
+with tab_degerlendirme:
     st.subheader(f"Bugünkü Yemekler Nasıldı? — {bugun_str}")
-    st.caption(gun_adi(bugun_str))
+    st.markdown(f'<div class="gun-adi-etiket">📆 {gun_adi(bugun_str)}</div>', unsafe_allow_html=True)
 
     if gunun_menusu is None:
         st.info("Bugün için sisteme henüz bir menü girilmemiş.")
