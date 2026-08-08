@@ -58,8 +58,52 @@ def worksheet_al(_spreadsheet, isim, kolonlar):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def df_oku(_worksheet, worksheet_adi: str) -> pd.DataFrame:
-    kayitlar = _worksheet.get_all_records()
-    return pd.DataFrame(kayitlar)
+    """gspread'in get_all_records() fonksiyonu, sayfada boş veya birbirini
+    tekrar eden başlık hücreleri olduğunda GSpreadException fırlatır.
+    Bunun yerine ham veriyi çekip başlıkları kendimiz temizliyoruz, böylece
+    sayfa elle düzenlenmiş / bozulmuş olsa bile uygulama çökmez."""
+    try:
+        degerler = _worksheet.get_all_values()
+    except Exception as e:
+        st.warning(
+            f"'{worksheet_adi}' sayfası okunurken bir sorun oluştu, boş kabul edildi: {e}"
+        )
+        return pd.DataFrame()
+
+    if not degerler:
+        return pd.DataFrame()
+
+    ham_basliklar = degerler[0]
+    satirlar = degerler[1:]
+
+    # Boş / tekrarlı başlıkları benzersiz hale getir
+    basliklar = []
+    gorulme = {}
+    for i, b in enumerate(ham_basliklar):
+        b = (b or "").strip()
+        if not b:
+            b = f"Sutun{i + 1}"
+        if b in gorulme:
+            gorulme[b] += 1
+            b = f"{b}_{gorulme[b]}"
+        else:
+            gorulme[b] = 0
+        basliklar.append(b)
+
+    # Satırların hücre sayısını başlık sayısına eşitle (eksikse boş, fazlaysa kes)
+    kolon_sayisi = len(basliklar)
+    duzeltilmis_satirlar = []
+    for satir in satirlar:
+        if len(satir) < kolon_sayisi:
+            satir = satir + [""] * (kolon_sayisi - len(satir))
+        elif len(satir) > kolon_sayisi:
+            satir = satir[:kolon_sayisi]
+        duzeltilmis_satirlar.append(satir)
+
+    # Tamamen boş satırları at
+    duzeltilmis_satirlar = [s for s in duzeltilmis_satirlar if any(str(x).strip() for x in s)]
+
+    return pd.DataFrame(duzeltilmis_satirlar, columns=basliklar)
 
 
 def satir_ekle(worksheet, satir: list):
