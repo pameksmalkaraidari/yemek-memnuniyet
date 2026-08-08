@@ -69,8 +69,9 @@ def menuyu_yukle(worksheet, df: pd.DataFrame):
     df = df.copy()
     df["Tarih"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce").dt.strftime(TARIH_FORMAT)
     df = df.dropna(subset=["Tarih"])
+    df = df.fillna("").astype(str)
     worksheet.clear()
-    worksheet.update([df.columns.values.tolist()] + df.astype(str).values.tolist())
+    worksheet.update([df.columns.values.tolist()] + df.values.tolist())
 
 
 def gemo_sablonunu_ayikla(raw: pd.DataFrame) -> pd.DataFrame:
