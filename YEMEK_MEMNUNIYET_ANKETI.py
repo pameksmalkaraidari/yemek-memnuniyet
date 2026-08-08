@@ -139,7 +139,7 @@ if baglanti_hatasi:
     st.stop()
 
 ws_menu = worksheet_al(spreadsheet, WS_MENU, ["Tarih"])
-ws_on = worksheet_al(spreadsheet, WS_ON, ["Tarih", "Puan", "KayitZamani"])
+ws_on = worksheet_al(spreadsheet, WS_ON, ["Tarih", "Degerlendirme", "KayitZamani"])
 ws_son = worksheet_al(spreadsheet, WS_SON, ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"])
 ws_oneri = worksheet_al(spreadsheet, WS_ONERI, ["Tarih", "Oneri", "KayitZamani"])
 
@@ -160,8 +160,6 @@ tab1, tab2, tab3 = st.tabs(
 
 # --- TAB 1: Aylık Menü & Ön Oylama ---
 with tab1:
-    st.subheader("Aylık Menü")
-
     if df_menu.empty:
         st.info("Sisteme henüz bir menü yüklenmemiş.")
     else:
@@ -170,40 +168,54 @@ with tab1:
         df_menu_sirali["_siralama"] = pd.to_datetime(
             df_menu_sirali["Tarih"], format=TARIH_FORMAT, errors="coerce"
         )
-        df_menu_sirali = df_menu_sirali.sort_values("_siralama")
+        df_menu_sirali = df_menu_sirali.sort_values("_siralama").reset_index(drop=True)
+        gun_listesi = df_menu_sirali["Tarih"].tolist()
 
-        st.markdown("Tüm ayın menüsünü aşağıda görebilir, dilediğin günü seçip oy verebilirsin.")
-        st.dataframe(
-            df_menu_sirali.drop(columns=["_siralama"]),
-            use_container_width=True,
-            hide_index=True,
-        )
+        if "on_oylama_indeks" not in st.session_state:
+            st.session_state.on_oylama_indeks = 0
 
-        st.divider()
+        indeks = st.session_state.on_oylama_indeks
 
-        gun_secenekleri = df_menu_sirali["Tarih"].tolist()
-        secili_tarih = st.selectbox("Oylamak istediğin günü seç", gun_secenekleri)
+        if indeks >= len(gun_listesi):
+            st.success("🎉 Bu ayki tüm günleri oyladın, teşekkürler!")
+            if st.button("Baştan Oylamaya Başla"):
+                st.session_state.on_oylama_indeks = 0
+                st.rerun()
+        else:
+            st.progress(indeks / len(gun_listesi), text=f"Gün {indeks + 1} / {len(gun_listesi)}")
 
-        secili_satir = df_menu_sirali[df_menu_sirali["Tarih"] == secili_tarih].iloc[0]
-        st.markdown(f"#### {secili_tarih} Menüsü")
-        for kolon in df_menu.columns:
-            if kolon != "Tarih" and str(secili_satir[kolon]).strip():
-                st.markdown(f"**{kolon}:** {secili_satir[kolon]}")
+            secili_satir = df_menu_sirali.iloc[indeks]
+            secili_tarih = secili_satir["Tarih"]
 
-        st.divider()
-        with st.form("on_oylama_form"):
-            on_puan = st.slider(
-                "Bu menüyü ne kadar merakla bekliyorsun / beğendin mi?",
-                min_value=1, max_value=5, value=4,
-                help="1: Hiç heyecanlı değilim, 5: Çok heyecanlıyım",
-            )
-            on_submit = st.form_submit_button("Oyumu Gönder")
-            if on_submit:
+            st.markdown(f"## {secili_tarih}")
+            for kolon in df_menu.columns:
+                if kolon != "Tarih" and str(secili_satir[kolon]).strip():
+                    st.markdown(f"**{kolon}:** {secili_satir[kolon]}")
+
+            st.write("")
+            c1, c2 = st.columns(2)
+
+            def _oy_kaydet_ve_ilerle(tarih, deger):
                 try:
-                    satir_ekle(ws_on, [secili_tarih, on_puan, datetime.now().strftime("%d.%m.%Y %H:%M:%S")])
-                    st.success(f"Teşekkürler! {secili_tarih} için oyun kaydedildi.")
+                    satir_ekle(ws_on, [tarih, deger, datetime.now().strftime("%d.%m.%Y %H:%M:%S")])
+                    st.session_state.on_oylama_indeks += 1
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Kayıt sırasında hata oluştu: {e}")
+
+            if c1.button("👍 İyi", use_container_width=True, key=f"iyi_{secili_tarih}"):
+                _oy_kaydet_ve_ilerle(secili_tarih, "İyi")
+            if c2.button("👎 Kötü", use_container_width=True, key=f"kotu_{secili_tarih}"):
+                _oy_kaydet_ve_ilerle(secili_tarih, "Kötü")
+
+        st.divider()
+        with st.expander("📅 Aylık Menü Tablosunu Gör"):
+            st.dataframe(
+                df_menu_sirali.drop(columns=["_siralama"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
 
 # --- TAB 2: Yemek Sonrası Değerlendirme ---
 with tab2:
@@ -396,10 +408,10 @@ with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
             st.markdown("### 📊 Özet")
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Ön Oylama Sayısı", len(df_on))
-            m2.metric(
-                "Ortalama Ön Puan",
-                f"{df_on['Puan'].astype(float).mean():.2f}" if not df_on.empty else "—",
+            iyi_orani = (
+                (df_on["Degerlendirme"] == "İyi").mean() * 100 if not df_on.empty else 0
             )
+            m2.metric("Ön Oylama İyi Oranı", f"%{iyi_orani:.0f}" if not df_on.empty else "—")
             m3.metric("Toplam Ürün Değerlendirmesi", len(df_son))
             kotu_orani = (
                 (df_son["Degerlendirme"] == "Kötü").mean() * 100 if not df_son.empty else 0
@@ -407,9 +419,11 @@ with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
             m4.metric("Kötü Oranı", f"%{kotu_orani:.0f}" if not df_son.empty else "—")
 
             st.divider()
-            st.markdown("### 📈 Ön Oylama Trend (Zaman İçinde)")
+            st.markdown("### 📈 Ön Oylama Trend (Zaman İçinde İyi Oranı)")
             if not df_on.empty:
-                on_ort = df_on.groupby("Tarih")["Puan"].apply(lambda x: pd.to_numeric(x).mean())
+                on_ort = df_on.groupby("Tarih")["Degerlendirme"].apply(
+                    lambda x: (x == "İyi").mean() * 100
+                )
                 on_ort.index = pd.to_datetime(on_ort.index, format=TARIH_FORMAT, errors="coerce")
                 st.line_chart(on_ort.sort_index())
             else:
