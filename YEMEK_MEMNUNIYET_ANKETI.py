@@ -267,7 +267,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("🍽️ Yemek ve Geri Bildirim Sistemi")
+st.title("🍽️ Pameks Giyim San. A.Ş. Yemek ve Menü Görüş Bildirim Sistemi")
 st.markdown("Görüşleriniz menüleri birlikte iyileştirmemiz için bizim çok değerli.")
 st.divider()
 
