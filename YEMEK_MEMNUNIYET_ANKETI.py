@@ -276,7 +276,7 @@ gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = simdi_tr().strftime(TARIH_FORMAT)
 
 tab_degerlendirme, tab_on_oylama, tab3 = st.tabs(
-    ["✅ Değerlendirme", "📅 Ön Oylama", "💡 Dilek-Şikâyet-Öneri"]
+    ["✅ Günün Menüsünü Değerlendirme", "📅 Aylık Menü Oylama", "💡 Dilek-Şikâyet-Öneri"]
 )
 
 # --- TAB 1: Aylık Menü & Ön Oylama ---
