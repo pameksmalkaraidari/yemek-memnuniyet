@@ -140,7 +140,7 @@ if baglanti_hatasi:
 
 ws_menu = worksheet_al(spreadsheet, WS_MENU, ["Tarih"])
 ws_on = worksheet_al(spreadsheet, WS_ON, ["Tarih", "Puan", "KayitZamani"])
-ws_son = worksheet_al(spreadsheet, WS_SON, ["Tarih", "Puan", "Eksiklikler", "KayitZamani"])
+ws_son = worksheet_al(spreadsheet, WS_SON, ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"])
 ws_oneri = worksheet_al(spreadsheet, WS_ONERI, ["Tarih", "Oneri", "KayitZamani"])
 
 # =========================================================
@@ -155,19 +155,40 @@ gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = datetime.today().strftime(TARIH_FORMAT)
 
 tab1, tab2, tab3 = st.tabs(
-    ["📋 Bugünün Menüsü & Ön Oylama", "✅ Yemek Sonrası Değerlendirme", "💡 Menü Önerisi"]
+    ["📅 Aylık Menü & Ön Oylama", "✅ Yemek Sonrası Değerlendirme", "💡 Menü Önerisi"]
 )
 
-# --- TAB 1: Ön Oylama ---
+# --- TAB 1: Aylık Menü & Ön Oylama ---
 with tab1:
-    st.subheader(f"Bugünün Menüsü — {bugun_str}")
+    st.subheader("Aylık Menü")
 
-    if gunun_menusu is None:
-        st.info("Bugün için sisteme henüz bir menü girilmemiş.")
+    if df_menu.empty:
+        st.info("Sisteme henüz bir menü yüklenmemiş.")
     else:
+        # Tarihe göre kronolojik sırala
+        df_menu_sirali = df_menu.copy()
+        df_menu_sirali["_siralama"] = pd.to_datetime(
+            df_menu_sirali["Tarih"], format=TARIH_FORMAT, errors="coerce"
+        )
+        df_menu_sirali = df_menu_sirali.sort_values("_siralama")
+
+        st.markdown("Tüm ayın menüsünü aşağıda görebilir, dilediğin günü seçip oy verebilirsin.")
+        st.dataframe(
+            df_menu_sirali.drop(columns=["_siralama"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.divider()
+
+        gun_secenekleri = df_menu_sirali["Tarih"].tolist()
+        secili_tarih = st.selectbox("Oylamak istediğin günü seç", gun_secenekleri)
+
+        secili_satir = df_menu_sirali[df_menu_sirali["Tarih"] == secili_tarih].iloc[0]
+        st.markdown(f"#### {secili_tarih} Menüsü")
         for kolon in df_menu.columns:
-            if kolon != "Tarih" and str(gunun_menusu[kolon]).strip():
-                st.markdown(f"**{kolon}:** {gunun_menusu[kolon]}")
+            if kolon != "Tarih" and str(secili_satir[kolon]).strip():
+                st.markdown(f"**{kolon}:** {secili_satir[kolon]}")
 
         st.divider()
         with st.form("on_oylama_form"):
@@ -179,8 +200,8 @@ with tab1:
             on_submit = st.form_submit_button("Oyumu Gönder")
             if on_submit:
                 try:
-                    satir_ekle(ws_on, [bugun_str, on_puan, datetime.now().strftime("%d.%m.%Y %H:%M:%S")])
-                    st.success("Teşekkürler! Oyun kaydedildi.")
+                    satir_ekle(ws_on, [secili_tarih, on_puan, datetime.now().strftime("%d.%m.%Y %H:%M:%S")])
+                    st.success(f"Teşekkürler! {secili_tarih} için oyun kaydedildi.")
                 except Exception as e:
                     st.error(f"Kayıt sırasında hata oluştu: {e}")
 
@@ -191,28 +212,62 @@ with tab2:
     if gunun_menusu is None:
         st.info("Bugün için sisteme henüz bir menü girilmemiş.")
     else:
-        for kolon in df_menu.columns:
-            if kolon != "Tarih" and str(gunun_menusu[kolon]).strip():
-                st.markdown(f"**{kolon}:** {gunun_menusu[kolon]}")
+        urun_kolonlari = [
+            k for k in df_menu.columns
+            if k != "Tarih" and str(gunun_menusu[k]).strip()
+        ]
 
+        st.markdown("Her ürünü ayrı ayrı değerlendir. **Kötü** seçersen kısa bir açıklama isteyeceğiz.")
         st.divider()
-        with st.form("son_degerlendirme_form"):
-            son_puan = st.slider(
-                "Genel Memnuniyet Puanı",
-                min_value=1, max_value=5, value=4,
-                help="1: Çok Kötü, 5: Çok İyi",
+
+        degerlendirmeler = {}
+        aciklamalar = {}
+
+        for kolon in urun_kolonlari:
+            urun_adi = gunun_menusu[kolon]
+            st.markdown(f"**{kolon}: {urun_adi}**")
+            secim = st.radio(
+                f"{kolon} nasıldı?",
+                ["Güzel", "Orta", "Kötü"],
+                index=1,
+                horizontal=True,
+                key=f"degerlendirme_{bugun_str}_{kolon}",
+                label_visibility="collapsed",
             )
-            eksiklikler = st.text_area(
-                "Eksiklikler / öneriler:",
-                placeholder="Örn: Tuz oranı biraz daha dengeli olabilir...",
+            degerlendirmeler[kolon] = secim
+
+            if secim == "Kötü":
+                aciklama = st.text_input(
+                    f"{kolon} için neden beğenmedin?",
+                    key=f"aciklama_{bugun_str}_{kolon}",
+                    placeholder="Örn: Fazla tuzluydu, soğuktu vb.",
+                )
+                aciklamalar[kolon] = aciklama
+
+            st.divider()
+
+        if st.button("Değerlendirmeyi Gönder", key="son_degerlendirme_gonder"):
+            eksik_aciklama_var = any(
+                degerlendirmeler[k] == "Kötü" and not aciklamalar.get(k, "").strip()
+                for k in urun_kolonlari
             )
-            son_submit = st.form_submit_button("Değerlendirmeyi Gönder")
-            if son_submit:
+            if eksik_aciklama_var:
+                st.warning("Kötü olarak işaretlediğin ürün(ler) için lütfen kısa bir açıklama yaz.")
+            else:
                 try:
-                    satir_ekle(
-                        ws_son,
-                        [bugun_str, son_puan, eksiklikler, datetime.now().strftime("%d.%m.%Y %H:%M:%S")],
-                    )
+                    zaman = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                    for kolon in urun_kolonlari:
+                        satir_ekle(
+                            ws_son,
+                            [
+                                bugun_str,
+                                kolon,
+                                gunun_menusu[kolon],
+                                degerlendirmeler[kolon],
+                                aciklamalar.get(kolon, ""),
+                                zaman,
+                            ],
+                        )
                     st.success("Teşekkürler! Değerlendirmeniz yönetim ekibine iletildi.")
                 except Exception as e:
                     st.error(f"Kayıt sırasında hata oluştu: {e}")
@@ -345,38 +400,57 @@ with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
                 "Ortalama Ön Puan",
                 f"{df_on['Puan'].astype(float).mean():.2f}" if not df_on.empty else "—",
             )
-            m3.metric("Son Değerlendirme Sayısı", len(df_son))
-            m4.metric(
-                "Ortalama Son Puan",
-                f"{df_son['Puan'].astype(float).mean():.2f}" if not df_son.empty else "—",
+            m3.metric("Toplam Ürün Değerlendirmesi", len(df_son))
+            kotu_orani = (
+                (df_son["Degerlendirme"] == "Kötü").mean() * 100 if not df_son.empty else 0
             )
+            m4.metric("Kötü Oranı", f"%{kotu_orani:.0f}" if not df_son.empty else "—")
 
             st.divider()
-            st.markdown("### 📈 Zaman İçinde Ortalama Puanlar")
-
-            grafik_df = pd.DataFrame()
+            st.markdown("### 📈 Ön Oylama Trend (Zaman İçinde)")
             if not df_on.empty:
                 on_ort = df_on.groupby("Tarih")["Puan"].apply(lambda x: pd.to_numeric(x).mean())
-                grafik_df["Ön Oylama"] = on_ort
-            if not df_son.empty:
-                son_ort = df_son.groupby("Tarih")["Puan"].apply(lambda x: pd.to_numeric(x).mean())
-                grafik_df["Son Değerlendirme"] = son_ort
-
-            if not grafik_df.empty:
-                grafik_df.index = pd.to_datetime(grafik_df.index, format=TARIH_FORMAT, errors="coerce")
-                grafik_df = grafik_df.sort_index()
-                st.line_chart(grafik_df)
+                on_ort.index = pd.to_datetime(on_ort.index, format=TARIH_FORMAT, errors="coerce")
+                st.line_chart(on_ort.sort_index())
+            else:
+                st.info("Henüz ön oylama verisi yok.")
 
             st.divider()
-            st.markdown("### 📝 Yemek Sonrası Yorumlar / Eksiklikler")
-            if df_son.empty or df_son["Eksiklikler"].str.strip().eq("").all():
-                st.info("Henüz yorum yok.")
+            st.markdown("### 🍽️ Ürün Bazında Dağılım (Yemek Sonrası)")
+            if df_son.empty:
+                st.info("Henüz ürün değerlendirmesi yok.")
             else:
-                yorumlu = df_son[df_son["Eksiklikler"].str.strip() != ""]
-                st.dataframe(
-                    yorumlu[["Tarih", "Puan", "Eksiklikler"]].sort_values("Tarih", ascending=False),
-                    use_container_width=True,
+                pivot = df_son.pivot_table(
+                    index="Kalem", columns="Degerlendirme", values="Tarih",
+                    aggfunc="count", fill_value=0,
                 )
+                for sutun in ["Güzel", "Orta", "Kötü"]:
+                    if sutun not in pivot.columns:
+                        pivot[sutun] = 0
+                pivot = pivot[["Güzel", "Orta", "Kötü"]]
+                st.bar_chart(pivot)
+
+                st.divider()
+                st.markdown("### ⚠️ Kötü Değerlendirmeler ve Açıklamalar")
+                kotuler = df_son[df_son["Degerlendirme"] == "Kötü"]
+                if kotuler.empty:
+                    st.success("Kötü olarak işaretlenen ürün yok.")
+                else:
+                    st.dataframe(
+                        kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]]
+                        .sort_values("Tarih", ascending=False),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    csv_kotu = kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]].to_csv(
+                        index=False
+                    ).encode("utf-8-sig")
+                    st.download_button(
+                        "⬇️ Kötü Değerlendirmeleri CSV Olarak İndir",
+                        data=csv_kotu,
+                        file_name=f"kotu_degerlendirmeler_{datetime.today().strftime('%d_%m_%Y')}.csv",
+                        mime="text/csv",
+                    )
 
             st.divider()
             st.markdown("### 💡 Menü Önerileri")
