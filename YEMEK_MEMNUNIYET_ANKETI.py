@@ -418,7 +418,7 @@ with tab3:
     with st.form("oneri_form"):
         oneri_metni = st.text_area(
             "Önerini yaz:",
-            placeholder="Örn: Ayda bir kere mercimek köftesi olabilir veya yemekte herhangi bir cisim çıktı gibi",
+            placeholder="Örn: Ayda bir kere mercimek köftesi olabilir. Veya yemekte herhangi bir cisim çıktı gibi...",
         )
         oneri_submit = st.form_submit_button("Öneriyi Gönder")
         if oneri_submit:
