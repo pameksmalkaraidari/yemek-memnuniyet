@@ -357,7 +357,7 @@ with tab_degerlendirme:
             if k != "Tarih" and str(gunun_menusu[k]).strip()
         ]
 
-        st.markdown("Her ürünü ayrı ayrı değerlendir. **Kötü** seçersen kısa bir açıklama isteyeceğiz.")
+        st.markdown("Her ürünü ayrı ayrı değerlendir. **Kötü** olduğunu düşünüyorsan nedenini bize açıklar mısın?.")
         st.divider()
 
         degerlendirmeler = {}
