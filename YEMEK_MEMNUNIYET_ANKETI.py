@@ -73,6 +73,43 @@ def menuyu_yukle(worksheet, df: pd.DataFrame):
     worksheet.update([df.columns.values.tolist()] + df.astype(str).values.tolist())
 
 
+def gemo_sablonunu_ayikla(raw: pd.DataFrame) -> pd.DataFrame:
+    """GEMO Gıda tarzı haftalık ızgara şablonunu (gün sütunları, altında
+    çorba/ana yemek/yardımcı/içecek satırları) uzun formata çevirir."""
+    satir_sayisi, kolon_sayisi = raw.shape
+
+    # Bir satırda en az 2 tarih hücresi varsa o satır "tarih satırı"dır
+    tarih_satirlari = []
+    for r in range(satir_sayisi):
+        adet = sum(isinstance(v, (pd.Timestamp, datetime)) for v in raw.iloc[r])
+        if adet >= 2:
+            tarih_satirlari.append(r)
+
+    etiketler = ["Çorba", "Ana Yemek", "Yardımcı", "İçecek/Tatlı", "Ekstra 1", "Ekstra 2", "Ekstra 3"]
+    kayitlar = []
+
+    for i, r in enumerate(tarih_satirlari):
+        sonraki_r = tarih_satirlari[i + 1] if i + 1 < len(tarih_satirlari) else satir_sayisi
+        for c in range(kolon_sayisi):
+            deger = raw.iat[r, c]
+            if not isinstance(deger, (pd.Timestamp, datetime)):
+                continue
+            tarih = pd.Timestamp(deger).strftime(TARIH_FORMAT)
+            kalemler = []
+            for rr in range(r + 1, sonraki_r):
+                hucre = raw.iat[rr, c]
+                if pd.notna(hucre) and str(hucre).strip() and str(hucre).strip().lower() != "kcal":
+                    kalemler.append(str(hucre).strip())
+            if kalemler:
+                kayit = {"Tarih": tarih}
+                for idx, kalem in enumerate(kalemler):
+                    etiket = etiketler[idx] if idx < len(etiketler) else f"Kalem {idx + 1}"
+                    kayit[etiket] = kalem
+                kayitlar.append(kayit)
+
+    return pd.DataFrame(kayitlar)
+
+
 def bugunun_menusu(df_menu: pd.DataFrame):
     if df_menu.empty or "Tarih" not in df_menu.columns:
         return None
@@ -206,28 +243,76 @@ with tab3:
 # =========================================================
 with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
 
+    if "admin_giris_yapildi" not in st.session_state:
+        st.session_state.admin_giris_yapildi = False
+
+    if not st.session_state.admin_giris_yapildi:
+        girilen_sifre = st.text_input("Yönetici Şifresi", type="password", key="admin_sifre_girisi")
+        if st.button("Giriş Yap"):
+            if girilen_sifre == st.secrets.get("admin_sifre", None):
+                st.session_state.admin_giris_yapildi = True
+                st.rerun()
+            else:
+                st.error("Şifre hatalı.")
+        st.stop()
+
+    cikis_col = st.columns([4, 1])[1]
+    with cikis_col:
+        if st.button("Çıkış Yap"):
+            st.session_state.admin_giris_yapildi = False
+            st.rerun()
+
     admin_tab1, admin_tab2 = st.tabs(["📤 Aylık Menü Yükle", "📊 Raporlar"])
 
     # --- Menü Yükleme ---
     with admin_tab1:
         st.markdown(
-            "Excel/CSV dosyanda bir **Tarih** sütunu ve istediğin kadar yemek "
-            "sütunu (Çorba, Ana Yemek, Ek Yemek, Tatlı vb.) olmalı. "
+            "GEMO Gıda'nın haftalık ızgara formatındaki Excel dosyasını olduğu gibi "
+            "yükleyebilirsin (gün sütunları, altında çorba/ana yemek/yardımcı/içecek "
+            "satırları). Ayrıca düz bir **Tarih** sütunlu CSV de kabul edilir. "
             "Yüklediğinde mevcut menünün **tamamen üzerine yazılır**."
         )
         yuklenen_dosya = st.file_uploader(
             "Aylık menü dosyasını seç", type=["csv", "xlsx", "xls"]
         )
+
+        yeni_menu_df = None
+
         if yuklenen_dosya is not None:
             try:
                 if yuklenen_dosya.name.endswith(".csv"):
                     yeni_menu_df = pd.read_csv(yuklenen_dosya)
+                    if "Tarih" not in yeni_menu_df.columns:
+                        st.error("Dosyada 'Tarih' adında bir sütun bulunamadı.")
+                        yeni_menu_df = None
                 else:
-                    yeni_menu_df = pd.read_excel(yuklenen_dosya)
+                    excel_dosyasi = pd.ExcelFile(yuklenen_dosya)
+                    sayfa_secimi = st.selectbox(
+                        "Hangi sayfayı içe aktarmak istiyorsun?",
+                        excel_dosyasi.sheet_names,
+                    )
+                    ham_veri = excel_dosyasi.parse(sayfa_secimi, header=None)
 
-                if "Tarih" not in yeni_menu_df.columns:
-                    st.error("Dosyada 'Tarih' adında bir sütun bulunamadı.")
-                else:
+                    # Önce GEMO ızgara şablonu olarak dene
+                    ayiklanan = gemo_sablonunu_ayikla(ham_veri)
+
+                    if not ayiklanan.empty:
+                        yeni_menu_df = ayiklanan
+                        st.success(
+                            f"Şablon otomatik tanındı — {len(ayiklanan)} günlük menü tespit edildi."
+                        )
+                    else:
+                        # Şablon tanınmazsa düz tablo (ilk satır başlık) olarak dene
+                        duz_deneme = excel_dosyasi.parse(sayfa_secimi)
+                        if "Tarih" in duz_deneme.columns:
+                            yeni_menu_df = duz_deneme
+                        else:
+                            st.error(
+                                "Bu sayfadan menü tespit edilemedi. Format farklı olabilir "
+                                "veya sayfa boş/kalori listesi gibi başka bir içerik olabilir."
+                            )
+
+                if yeni_menu_df is not None:
                     st.markdown("**Önizleme:**")
                     st.dataframe(yeni_menu_df, use_container_width=True)
 
