@@ -17,9 +17,10 @@ st.set_page_config(
 # GOOGLE SHEETS BAĞLANTISI
 # =========================================================
 # .streamlit/secrets.toml içine (veya Streamlit Cloud > Settings > Secrets)
-# aşağıdaki yapıda bir servis hesabı bilgisi ve sheet adı eklenmeli:
+# aşağıdaki yapıda bir servis hesabı bilgisi ve sheet ID'si eklenmeli:
 #
-# sheet_name = "Yemek_Geri_Bildirim"
+# sheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz..."
+#   (Sheet'in tarayıcı adres çubuğundaki uzun kod: .../d/BURASI/edit)
 #
 # [gcp_service_account]
 # type = "service_account"
@@ -31,10 +32,12 @@ st.set_page_config(
 #
 # Not: İlgili Google Sheet dosyasını bu servis hesabının e-postasıyla
 # (client_email) "Düzenleyen" olarak paylaşmayı unutma.
+#
+# Sadece Google Sheets API yeterli — sheet ID ile açtığımız için
+# Google Drive API'yi ayrıca etkinleştirmene gerek yok.
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
 ]
 
 WORKSHEET_NAME = "Kayitlar"
@@ -47,7 +50,7 @@ def sheets_baglantisi_al():
         st.secrets["gcp_service_account"], scopes=SCOPES
     )
     client = gspread.authorize(creds)
-    spreadsheet = client.open(st.secrets["sheet_name"])
+    spreadsheet = client.open_by_key(st.secrets["sheet_id"])
 
     try:
         worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
@@ -86,7 +89,7 @@ except Exception as e:
 if baglanti_hatasi:
     st.error(
         "⚠️ Google Sheets bağlantısı kurulamadı. Lütfen `secrets.toml` "
-        "içindeki `gcp_service_account` ve `sheet_name` ayarlarını kontrol edin."
+        "içindeki `gcp_service_account` ve `sheet_id` ayarlarını kontrol edin."
     )
     with st.expander("Hata detayı"):
         st.code(baglanti_hatasi)
