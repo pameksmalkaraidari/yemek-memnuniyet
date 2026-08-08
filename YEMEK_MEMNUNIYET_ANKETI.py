@@ -74,9 +74,18 @@ def mail_gonder(konu: str, govde_html: str):
     mesaj["To"] = ", ".join(aliciler)
     mesaj.attach(MIMEText(govde_html, "html", "utf-8"))
 
-    with smtplib.SMTP_SSL(smtp_sunucu, smtp_port) as sunucu:
-        sunucu.login(gonderen, sifre)
-        sunucu.sendmail(gonderen, aliciler, mesaj.as_string())
+    if smtp_port == 465:
+        # 465: baştan itibaren şifreli bağlantı (SSL) — Gmail'in klasik yöntemi
+        with smtplib.SMTP_SSL(smtp_sunucu, smtp_port) as sunucu:
+            sunucu.login(gonderen, sifre)
+            sunucu.sendmail(gonderen, aliciler, mesaj.as_string())
+    else:
+        # 587 (ve çoğu şirket maili / Microsoft 365 vb.): önce düz bağlan,
+        # sonra STARTTLS ile şifreli hale getir
+        with smtplib.SMTP(smtp_sunucu, smtp_port) as sunucu:
+            sunucu.starttls()
+            sunucu.login(gonderen, sifre)
+            sunucu.sendmail(gonderen, aliciler, mesaj.as_string())
 
 
 def gunluk_ozet_html(tarih_str: str, df_on: pd.DataFrame, df_son: pd.DataFrame, df_oneri: pd.DataFrame) -> str:
