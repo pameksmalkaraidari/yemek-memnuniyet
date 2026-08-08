@@ -414,7 +414,7 @@ with tab_degerlendirme:
 
 # --- TAB 3: Menü Önerisi ---
 with tab3:
-    st.subheader("Menü Önerin Var mı?Veya Herhangi bir konuda şikâyetin var mı?)
+    st.subheader("Menü Önerin Var mı?Veya Herhangi bir konuda şikâyetin var mı?")
     with st.form("oneri_form"):
         oneri_metni = st.text_area(
             "Önerini yaz:",
