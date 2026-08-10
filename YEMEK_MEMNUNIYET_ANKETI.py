@@ -35,6 +35,7 @@ WS_MENU = "GunlukMenu"
 WS_ON = "OnOylama"
 WS_SON = "SonDegerlendirme"
 WS_ONERI = "MenuOneri"
+WS_ZIYARET = "Ziyaretler"
 
 TARIH_FORMAT = "%d.%m.%Y"
 TR_TZ = ZoneInfo("Europe/Istanbul")
@@ -192,6 +193,11 @@ def bugunun_menusu(df_menu: pd.DataFrame):
     return eslesen.iloc[0]
 
 
+AY_ADLARI_TR = [
+    "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık",
+]
+
 GUN_ADLARI_TR = [
     "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar",
 ]
@@ -229,6 +235,7 @@ try:
     ws_on = worksheet_al(spreadsheet, WS_ON, ["Tarih", "Degerlendirme", "KayitZamani"])
     ws_son = worksheet_al(spreadsheet, WS_SON, ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"])
     ws_oneri = worksheet_al(spreadsheet, WS_ONERI, ["Tarih", "Oneri", "KayitZamani"])
+    ws_ziyaret = worksheet_al(spreadsheet, WS_ZIYARET, ["Tarih", "KayitZamani"])
 except Exception as e:
     st.error(
         "⚠️ Google Sheets ile iletişimde bir sorun oluştu. Bu genellikle Google'ın "
@@ -301,6 +308,22 @@ st.divider()
 df_menu = df_oku(ws_menu, WS_MENU)
 gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = simdi_tr().strftime(TARIH_FORMAT)
+
+# Yönetici erişimini burada belirliyoruz ki hem ziyaret sayacı hem de
+# aşağıdaki yönetici paneli aynı değeri kullansın.
+yonetici_erisimi = "admin" in st.query_params
+
+# --- Ziyaretçi sayacı ---
+# Her oturumda (tarayıcı sekmesi/telefon) sadece BİR KEZ kaydediyoruz;
+# Streamlit her etkileşimde script'i baştan çalıştırdığı için session_state
+# olmadan her tıklamada ayrı bir ziyaret sayılırdı. Yönetici erişimi
+# (?admin=1) sayaca dahil edilmiyor ki rakam gerçek kullanıcıları yansıtsın.
+if not yonetici_erisimi and "ziyaret_kaydedildi" not in st.session_state:
+    try:
+        satir_ekle(ws_ziyaret, [bugun_str, simdi_tr().strftime("%d.%m.%Y %H:%M:%S")])
+    except Exception:
+        pass  # ziyaret kaydı başarısız olsa bile kullanıcı deneyimi etkilenmesin
+    st.session_state.ziyaret_kaydedildi = True
 
 st.markdown("#### Ne yapmak istersin?")
 with st.container(key="ana_bolum_kutusu"):
@@ -470,8 +493,6 @@ if secim == "💡 Dilek-Şikâyet-Öneri":
 # =========================================================
 # YÖNETİCİ PANELİ
 # =========================================================
-yonetici_erisimi = "admin" in st.query_params
-
 if yonetici_erisimi:
     with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
 
@@ -657,6 +678,37 @@ if yonetici_erisimi:
                 df_oku(ws_oneri, WS_ONERI), ["Tarih", "Oneri", "KayitZamani"], WS_ONERI
             )
 
+            # --- Ziyaretçi Sayısı ---
+            st.markdown("### 👥 Ziyaretçi Sayısı")
+            df_ziyaret = df_oku(ws_ziyaret, WS_ZIYARET)
+            if df_ziyaret.empty or "Tarih" not in df_ziyaret.columns:
+                st.info("Henüz kayıtlı ziyaret yok.")
+            else:
+                bugun_tarih_obj = pd.to_datetime(bugun_str, format=TARIH_FORMAT)
+                ziyaret_tarihleri = pd.to_datetime(
+                    df_ziyaret["Tarih"], format=TARIH_FORMAT, errors="coerce"
+                )
+                bugun_ziyaret = (df_ziyaret["Tarih"] == bugun_str).sum()
+                bu_ay_ziyaret = (
+                    (ziyaret_tarihleri.dt.year == bugun_tarih_obj.year)
+                    & (ziyaret_tarihleri.dt.month == bugun_tarih_obj.month)
+                ).sum()
+                toplam_ziyaret = len(df_ziyaret)
+
+                v1, v2, v3 = st.columns(3)
+                v1.metric("Bugün", int(bugun_ziyaret))
+                v2.metric(f"{AY_ADLARI_TR[bugun_tarih_obj.month - 1]} Ayı", int(bu_ay_ziyaret))
+                v3.metric("Toplam (Tüm Zamanlar)", int(toplam_ziyaret))
+
+                with st.expander("📈 Günlük Ziyaretçi Trendi"):
+                    gunluk_ziyaret = df_ziyaret.groupby("Tarih").size()
+                    gunluk_ziyaret.index = pd.to_datetime(
+                        gunluk_ziyaret.index, format=TARIH_FORMAT, errors="coerce"
+                    )
+                    st.line_chart(gunluk_ziyaret.sort_index())
+
+            st.divider()
+
             if df_on.empty and df_son.empty:
                 st.info("Henüz hiç oylama verisi yok.")
             else:
@@ -832,11 +884,12 @@ if yonetici_erisimi:
 
                     st.divider()
                     st.markdown("### ⬇️ Tüm Verileri Excel Olarak İndir")
-                    st.caption("OnOylama, Değerlendirme ve Öneri/Şikâyet verilerinin tamamı, ayrı sayfalar hâlinde tek bir Excel dosyasında.")
+                    st.caption("OnOylama, Değerlendirme, Öneri/Şikâyet ve Ziyaretçi verilerinin tamamı, ayrı sayfalar hâlinde tek bir Excel dosyasında.")
                     tum_excel = excel_olustur({
                         "OnOylama": df_on,
                         "SonDegerlendirme": df_son,
                         "MenuOneri": df_oneri,
+                        "Ziyaretler": df_ziyaret,
                     })
                     st.download_button(
                         "⬇️ Tüm Raporu Excel Olarak İndir",
