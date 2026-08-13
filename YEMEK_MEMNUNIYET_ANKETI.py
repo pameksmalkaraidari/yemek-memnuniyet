@@ -364,7 +364,6 @@ cookies = EncryptedCookieManager(
     password=st.secrets.get(
         "cookies_sifre", "pameks-yemek-anketi-varsayilan-sifre-degistir"
     ),
-    expiry_days=COOKIE_GECERLILIK_GUN,
 )
 
 # Bileşen tarayıcıdaki çerezleri Python tarafına aktarana kadar (bir
