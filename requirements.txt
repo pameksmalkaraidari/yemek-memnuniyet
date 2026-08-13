@@ -3,4 +3,4 @@ pandas
 gspread
 google-auth
 openpyxl
-streamlit-cookies-controller
+streamlit-cookies-manager
