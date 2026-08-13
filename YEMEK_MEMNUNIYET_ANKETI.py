@@ -58,84 +58,186 @@ def simdi_tr() -> datetime:
     return datetime.now(TR_TZ)
 
 
-def gunluk_ozet_excel(
-    tarih_str: str,
+def tarih_araligina_filtrele(df: pd.DataFrame, baslangic, bitis) -> pd.DataFrame:
+    """df'in 'Tarih' sütununu (DD.MM.YYYY metni) ayrıştırıp [baslangic, bitis]
+    (date nesneleri, iki uç dahil) aralığındaki satırları döndürür."""
+    if df is None or df.empty or "Tarih" not in df.columns:
+        return pd.DataFrame(columns=(df.columns if df is not None else []))
+    d = df.copy()
+    d["_t"] = pd.to_datetime(d["Tarih"], format=TARIH_FORMAT, errors="coerce").dt.date
+    d = d[(d["_t"] >= baslangic) & (d["_t"] <= bitis)]
+    return d.drop(columns=["_t"])
+
+
+def araligin_menu_metni(df_menu: pd.DataFrame, tarih_str: str) -> str:
+    """Belirli bir günün menüsünü 'Kalem: Yemek | Kalem: Yemek' şeklinde tek
+    satırlık metne çevirir."""
+    if df_menu is None or df_menu.empty or "Tarih" not in df_menu.columns:
+        return ""
+    eslesen = df_menu[df_menu["Tarih"] == tarih_str]
+    if eslesen.empty:
+        return ""
+    satir = eslesen.iloc[0]
+    parcalar = [
+        f"{kolon}: {satir[kolon]}"
+        for kolon in df_menu.columns
+        if kolon != "Tarih" and str(satir[kolon]).strip()
+    ]
+    return " | ".join(parcalar)
+
+
+def ozet_excel_raporu(
+    baslangic,
+    bitis,
     df_on: pd.DataFrame,
     df_son: pd.DataFrame,
     df_oneri: pd.DataFrame,
     df_menu: pd.DataFrame,
 ) -> bytes:
-    """Belirtilen tarih için o günün menüsü, ön oylama, yemek bazlı
-    değerlendirme ve öneri verilerinden çok sayfalı bir Excel dosyası
-    (bytes) üretir."""
-    tampon = io.BytesIO()
-    with pd.ExcelWriter(tampon, engine="openpyxl") as yazici:
-        # --- Menü sayfası ---
-        menu_satirlari = []
-        if df_menu is not None and not df_menu.empty and "Tarih" in df_menu.columns:
-            eslesen_menu = df_menu[df_menu["Tarih"] == tarih_str]
-            if not eslesen_menu.empty:
-                menu_satiri = eslesen_menu.iloc[0]
-                for kolon in df_menu.columns:
-                    if kolon != "Tarih" and str(menu_satiri[kolon]).strip():
-                        menu_satirlari.append({"Kalem": kolon, "Yemek": menu_satiri[kolon]})
-        pd.DataFrame(menu_satirlari if menu_satirlari else [{"Kalem": "-", "Yemek": "Menü bulunamadı"}]).to_excel(
-            yazici, sheet_name="Günün Menüsü", index=False
+    """Seçilen tarih aralığı (baslangic/bitis: date, iki uç dahil) için genel
+    özet, günlük menü + ön oylama, yemek bazlı performans, günlük detay,
+    kötü değerlendirmeler, öneri/şikâyetler ve menü sayfalarından oluşan
+    çok sayfalı bir Excel raporu (bytes) üretir."""
+    on_ar = tarih_araligina_filtrele(df_on, baslangic, bitis)
+    son_ar = tarih_araligina_filtrele(df_son, baslangic, bitis)
+    oneri_ar = tarih_araligina_filtrele(df_oneri, baslangic, bitis)
+    menu_ar = tarih_araligina_filtrele(df_menu, baslangic, bitis)
+
+    if not son_ar.empty:
+        son_ar = son_ar.copy()
+        son_ar["_puan_sayi"] = pd.to_numeric(son_ar["Degerlendirme"], errors="coerce")
+        son_ar["_kategori"] = son_ar["Degerlendirme"].apply(puan_kategorisi)
+        son_ar["_yemek"] = son_ar.apply(
+            lambda s: s["UrunAdi"] if str(s.get("UrunAdi", "")).strip() else s["Kalem"], axis=1
         )
 
-        # --- Ön oylama sayfası ---
-        on_bugun = df_on[df_on["Tarih"] == tarih_str] if not df_on.empty and "Tarih" in df_on.columns else pd.DataFrame()
-        if on_bugun.empty:
-            pd.DataFrame([{"Sonuç": "Bugün için ön oylama verisi yok."}]).to_excel(
-                yazici, sheet_name="Ön Oylama", index=False
+    def _tarihe_gore_sirala(df, artan=True):
+        df = df.copy()
+        df["_s"] = pd.to_datetime(df["Tarih"], format=TARIH_FORMAT, errors="coerce")
+        df = df.sort_values("_s", ascending=artan).drop(columns=["_s"])
+        return df
+
+    tampon = io.BytesIO()
+    with pd.ExcelWriter(tampon, engine="openpyxl") as yazici:
+        # --- 1. Genel Özet ---
+        toplam_on = len(on_ar)
+        iyi = int((on_ar["Degerlendirme"] == "İyi").sum()) if not on_ar.empty else 0
+        kotu_on = int((on_ar["Degerlendirme"] == "Kötü").sum()) if not on_ar.empty else 0
+        iyi_orani = round(iyi / toplam_on * 100, 1) if toplam_on else 0
+
+        toplam_son = len(son_ar)
+        ort_puan = round(son_ar["_puan_sayi"].mean(), 2) if not son_ar.empty else 0
+        kotu_son = int((son_ar["_kategori"] == "Kötü").sum()) if not son_ar.empty else 0
+        kotu_orani = round(kotu_son / toplam_son * 100, 1) if toplam_son else 0
+
+        pd.DataFrame([
+            {"Alan": "Rapor Aralığı", "Değer": f"{baslangic.strftime('%d.%m.%Y')} - {bitis.strftime('%d.%m.%Y')}"},
+            {"Alan": "Toplam Ön Oylama", "Değer": toplam_on},
+            {"Alan": "Ön Oylama İyi", "Değer": iyi},
+            {"Alan": "Ön Oylama Kötü", "Değer": kotu_on},
+            {"Alan": "Ön Oylama İyi Oranı (%)", "Değer": iyi_orani},
+            {"Alan": "Toplam Ürün Değerlendirmesi", "Değer": toplam_son},
+            {"Alan": "Ortalama Puan (1-5)", "Değer": ort_puan},
+            {"Alan": "Kötü Değerlendirme Sayısı (1-2 Puan)", "Değer": kotu_son},
+            {"Alan": "Kötü Oranı (%)", "Değer": kotu_orani},
+            {"Alan": "Toplam Öneri / Şikâyet", "Değer": len(oneri_ar)},
+        ]).to_excel(yazici, sheet_name="Genel Özet", index=False)
+
+        # --- 2. Menü Ön Değerlendirme (gün + o günün menüsü + ön oylama) ---
+        tum_tarihler = sorted(
+            set(menu_ar["Tarih"]) | set(on_ar["Tarih"] if not on_ar.empty else []),
+            key=lambda t: datetime.strptime(t, TARIH_FORMAT),
+        )
+        if not tum_tarihler:
+            pd.DataFrame([{"Sonuç": "Bu tarih aralığında menü ya da ön oylama verisi yok."}]).to_excel(
+                yazici, sheet_name="Menü Ön Değerlendirme", index=False
             )
         else:
-            iyi = int((on_bugun["Degerlendirme"] == "İyi").sum())
-            kotu = int((on_bugun["Degerlendirme"] == "Kötü").sum())
-            toplam = len(on_bugun)
-            oran = round((iyi / toplam * 100), 1) if toplam else 0
-            pd.DataFrame(
-                [{"Toplam Oy": toplam, "İyi": iyi, "Kötü": kotu, "İyi Oranı (%)": oran}]
-            ).to_excel(yazici, sheet_name="Ön Oylama", index=False)
+            satirlar = []
+            for t in tum_tarihler:
+                gunluk_on = on_ar[on_ar["Tarih"] == t] if not on_ar.empty else pd.DataFrame()
+                g_iyi = int((gunluk_on["Degerlendirme"] == "İyi").sum())
+                g_kotu = int((gunluk_on["Degerlendirme"] == "Kötü").sum())
+                g_toplam = len(gunluk_on)
+                satirlar.append({
+                    "Tarih": t,
+                    "Gün": gun_adi(t),
+                    "Menü": araligin_menu_metni(df_menu, t),
+                    "İyi": g_iyi,
+                    "Kötü": g_kotu,
+                    "Toplam Oy": g_toplam,
+                    "İyi Oranı (%)": round(g_iyi / g_toplam * 100, 1) if g_toplam else "",
+                })
+            pd.DataFrame(satirlar).to_excel(yazici, sheet_name="Menü Ön Değerlendirme", index=False)
 
-        # --- Yemek bazlı değerlendirme sayfası (kategori değil, gerçek yemek adı) ---
-        son_bugun = df_son[df_son["Tarih"] == tarih_str] if not df_son.empty and "Tarih" in df_son.columns else pd.DataFrame()
-        if son_bugun.empty:
-            pd.DataFrame([{"Sonuç": "Bugün için değerlendirme verisi yok."}]).to_excel(
-                yazici, sheet_name="Yemek Değerlendirme", index=False
+        # --- 3. Yemek Bazlı Genel Performans (en kötüden en iyiye) ---
+        if son_ar.empty:
+            pd.DataFrame([{"Sonuç": "Bu tarih aralığında değerlendirme verisi yok."}]).to_excel(
+                yazici, sheet_name="Yemek Performansı", index=False
             )
         else:
-            son_bugun = son_bugun.copy()
-            son_bugun["_kategori"] = son_bugun["Degerlendirme"].apply(puan_kategorisi)
-            son_bugun["_yemek"] = son_bugun.apply(
-                lambda satir: satir["UrunAdi"] if str(satir.get("UrunAdi", "")).strip() else satir["Kalem"],
-                axis=1,
+            perf = son_ar.groupby("_yemek").agg(
+                Değerlendirme_Sayısı=("_puan_sayi", "count"),
+                Ortalama_Puan=("_puan_sayi", "mean"),
             )
-            pivot = son_bugun.pivot_table(
-                index="_yemek", columns="_kategori", values="Tarih", aggfunc="count", fill_value=0
-            )
-            for sutun in ["Güzel", "Orta", "Kötü"]:
-                if sutun not in pivot.columns:
-                    pivot[sutun] = 0
-            pivot = pivot[["Güzel", "Orta", "Kötü"]]
-            pivot["Ortalama Puan"] = son_bugun.groupby("_yemek")["Degerlendirme"].apply(
-                lambda x: pd.to_numeric(x, errors="coerce").mean()
-            ).round(2)
-            pivot.index.name = "Yemek"
-            pivot.reset_index().to_excel(yazici, sheet_name="Yemek Değerlendirme", index=False)
+            kotu_sayilar = son_ar[son_ar["_kategori"] == "Kötü"].groupby("_yemek").size()
+            perf["Kötü_Sayısı"] = kotu_sayilar.reindex(perf.index, fill_value=0)
+            perf["Kötü_Oranı"] = (perf["Kötü_Sayısı"] / perf["Değerlendirme_Sayısı"] * 100).round(1)
+            perf["Ortalama_Puan"] = perf["Ortalama_Puan"].round(2)
+            perf = perf.sort_values("Ortalama_Puan")
+            perf.index.name = "Yemek"
+            perf.reset_index().rename(columns={
+                "Değerlendirme_Sayısı": "Değerlendirme Sayısı",
+                "Ortalama_Puan": "Ortalama Puan",
+                "Kötü_Sayısı": "Kötü Sayısı",
+                "Kötü_Oranı": "Kötü Oranı (%)",
+            }).to_excel(yazici, sheet_name="Yemek Performansı", index=False)
 
-            kotuler = son_bugun[son_bugun["_kategori"] == "Kötü"]
-            if not kotuler.empty:
-                kotuler[["Kalem", "UrunAdi", "Degerlendirme", "Aciklama"]].rename(
-                    columns={"Kalem": "Öğün Kalemi", "UrunAdi": "Yemek", "Degerlendirme": "Puan", "Aciklama": "Açıklama"}
-                ).to_excel(yazici, sheet_name="Kötü Değerlendirmeler", index=False)
+        # --- 4. Günlük Detay (her gün, her yemek) ---
+        if son_ar.empty:
+            pd.DataFrame([{"Sonuç": "Veri yok."}]).to_excel(yazici, sheet_name="Günlük Detay", index=False)
+        else:
+            detay = son_ar.groupby(["Tarih", "Kalem", "_yemek"]).agg(
+                Ortalama_Puan=("_puan_sayi", "mean"),
+                Değerlendirme_Sayısı=("_puan_sayi", "count"),
+            ).reset_index()
+            detay["Ortalama_Puan"] = detay["Ortalama_Puan"].round(2)
+            detay = detay.rename(columns={
+                "Kalem": "Öğün Kalemi", "_yemek": "Yemek",
+                "Ortalama_Puan": "Ortalama Puan", "Değerlendirme_Sayısı": "Değerlendirme Sayısı",
+            })
+            _tarihe_gore_sirala(detay).to_excel(yazici, sheet_name="Günlük Detay", index=False)
 
-        # --- Öneri/şikayet sayfası ---
-        oneri_bugun = df_oneri[df_oneri["Tarih"] == tarih_str] if not df_oneri.empty and "Tarih" in df_oneri.columns else pd.DataFrame()
-        if not oneri_bugun.empty:
-            oneri_bugun[["Oneri"]].rename(columns={"Oneri": "Öneri / Şikâyet"}).to_excel(
-                yazici, sheet_name="Öneriler", index=False
+        # --- 5. Kötü Değerlendirmeler ve Açıklamalar ---
+        kotuler = son_ar[son_ar["_kategori"] == "Kötü"] if not son_ar.empty else pd.DataFrame()
+        if kotuler.empty:
+            pd.DataFrame([{"Sonuç": "Bu tarih aralığında 1-2 puan verilen ürün yok."}]).to_excel(
+                yazici, sheet_name="Kötü Değerlendirmeler", index=False
             )
+        else:
+            kotuler_sirali = kotuler[["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama"]].rename(
+                columns={"Kalem": "Öğün Kalemi", "UrunAdi": "Yemek", "Degerlendirme": "Puan", "Aciklama": "Açıklama"}
+            )
+            _tarihe_gore_sirala(kotuler_sirali, artan=False).to_excel(
+                yazici, sheet_name="Kötü Değerlendirmeler", index=False
+            )
+
+        # --- 6. Öneriler / Şikâyetler ---
+        if oneri_ar.empty:
+            pd.DataFrame([{"Sonuç": "Bu tarih aralığında öneri/şikâyet yok."}]).to_excel(
+                yazici, sheet_name="Öneriler-Şikayetler", index=False
+            )
+        else:
+            oneri_sirali = oneri_ar[["Tarih", "Oneri"]].rename(columns={"Oneri": "Öneri / Şikâyet"})
+            _tarihe_gore_sirala(oneri_sirali, artan=False).to_excel(yazici, sheet_name="Öneriler-Şikayetler", index=False)
+
+        # --- 7. Menü (Referans) ---
+        if menu_ar.empty:
+            pd.DataFrame([{"Sonuç": "Bu tarih aralığında menü verisi yok."}]).to_excel(
+                yazici, sheet_name="Menü (Referans)", index=False
+            )
+        else:
+            _tarihe_gore_sirala(menu_ar).to_excel(yazici, sheet_name="Menü (Referans)", index=False)
 
     return tampon.getvalue()
 
@@ -905,23 +1007,72 @@ if yonetici_erisimi:
                     )
 
                 st.divider()
-                st.markdown("### 📊 Günlük Raporu Excel Olarak İndir")
-                secilen_rapor_tarihi = st.date_input(
-                    "Hangi günün raporu indirilsin?",
-                    value=simdi_tr().date(),
-                    format="DD.MM.YYYY",
-                    key="excel_rapor_tarih_secimi",
+                st.markdown("### 📊 Raporu Excel Olarak İndir")
+
+                rapor_araligi_turu = st.radio(
+                    "Rapor aralığı",
+                    ["Günlük", "Haftalık", "Aylık", "Özel Tarih Aralığı"],
+                    horizontal=True,
+                    key="excel_rapor_araligi_turu",
                 )
-                secilen_rapor_tarihi_str = secilen_rapor_tarihi.strftime(TARIH_FORMAT)
+
+                bugun_tarihi = simdi_tr().date()
+
+                if rapor_araligi_turu == "Günlük":
+                    secilen_gun = st.date_input(
+                        "Hangi günün raporu indirilsin?",
+                        value=bugun_tarihi,
+                        format="DD.MM.YYYY",
+                        key="excel_rapor_gun_secimi",
+                    )
+                    rapor_baslangic = rapor_bitis = secilen_gun
+
+                elif rapor_araligi_turu == "Haftalık":
+                    referans_gun = st.date_input(
+                        "Bu haftanın herhangi bir günü",
+                        value=bugun_tarihi,
+                        format="DD.MM.YYYY",
+                        key="excel_rapor_hafta_secimi",
+                    )
+                    rapor_baslangic = referans_gun - pd.Timedelta(days=referans_gun.weekday())
+                    rapor_bitis = rapor_baslangic + pd.Timedelta(days=6)
+                    st.caption(f"Seçilen hafta: {rapor_baslangic.strftime('%d.%m.%Y')} – {rapor_bitis.strftime('%d.%m.%Y')} (Pazartesi–Pazar)")
+
+                elif rapor_araligi_turu == "Aylık":
+                    referans_gun = st.date_input(
+                        "Bu ayın herhangi bir günü",
+                        value=bugun_tarihi,
+                        format="DD.MM.YYYY",
+                        key="excel_rapor_ay_secimi",
+                    )
+                    rapor_baslangic = referans_gun.replace(day=1)
+                    sonraki_ay = (rapor_baslangic + pd.Timedelta(days=32)).replace(day=1)
+                    rapor_bitis = sonraki_ay - pd.Timedelta(days=1)
+                    st.caption(f"Seçilen ay: {rapor_baslangic.strftime('%d.%m.%Y')} – {rapor_bitis.strftime('%d.%m.%Y')}")
+
+                else:  # Özel Tarih Aralığı
+                    aralik = st.date_input(
+                        "Başlangıç ve bitiş tarihini seç",
+                        value=(bugun_tarihi.replace(day=1), bugun_tarihi),
+                        format="DD.MM.YYYY",
+                        key="excel_rapor_ozel_aralik",
+                    )
+                    if isinstance(aralik, tuple) and len(aralik) == 2:
+                        rapor_baslangic, rapor_bitis = aralik
+                    else:
+                        rapor_baslangic = rapor_bitis = aralik
 
                 try:
-                    excel_verisi = gunluk_ozet_excel(
-                        secilen_rapor_tarihi_str, df_on, df_son, df_oneri, df_menu
+                    excel_verisi = ozet_excel_raporu(
+                        rapor_baslangic, rapor_bitis, df_on, df_son, df_oneri, df_menu
                     )
                     st.download_button(
                         "⬇️ Excel Raporunu İndir",
                         data=excel_verisi,
-                        file_name=f"gunluk_yemek_raporu_{secilen_rapor_tarihi.strftime('%d_%m_%Y')}.xlsx",
+                        file_name=(
+                            f"yemek_raporu_{rapor_baslangic.strftime('%d_%m_%Y')}"
+                            f"_{rapor_bitis.strftime('%d_%m_%Y')}.xlsx"
+                        ),
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
                 except Exception as e:
