@@ -1,4 +1,5 @@
 import re
+import time
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -352,6 +353,22 @@ except Exception as e:
 # =========================================================
 cookies = CookieController()
 
+# streamlit-cookies-controller, tarayıcıdaki çerezleri Python tarafına
+# aktarmak için en az bir ekstra "rerun" turuna ihtiyaç duyar. Bileşen
+# henüz yüklenmemişken cookies.getAll() genellikle None döner. Bu anda
+# "hiç çerez yok" diye devam edilirse, kişi daha önce değerlendirme
+# yapmış olsa bile bu her yeni oturumda (ör. QR kodu her okutuşta) fark
+# edilmez ve günlük kısıtlama fiilen hiç çalışmamış gibi davranır.
+# Bu yüzden bileşen çerezleri gerçekten yükleyene kadar (en fazla birkaç
+# turluk bir sınırla, sonsuz döngüye girmemek için) bekliyoruz.
+if cookies.getAll() is None:
+    st.session_state["_cerez_bekleme_sayaci"] = (
+        st.session_state.get("_cerez_bekleme_sayaci", 0) + 1
+    )
+    if st.session_state["_cerez_bekleme_sayaci"] <= 4:
+        st.info("Yükleniyor, lütfen bekleyin...")
+        st.stop()
+
 
 def cihazda_oylanan_gunleri_oku(cookie_adi: str) -> set:
     """İlgili çerezden, bu cihazda daha önce oylanmış/değerlendirilmiş
@@ -372,6 +389,10 @@ def cihaza_oylanan_gun_ekle(cookie_adi: str, mevcut_kume: set, yeni_tarih: str):
         ",".join(sorted(guncel)),
         max_age=60 * 60 * 24 * COOKIE_GECERLILIK_GUN,
     )
+    # Çerez yazma isteği tarayıcıya JS köprüsü üzerinden ulaşıyor; hemen
+    # ardından st.rerun() çağrılırsa bu istek tamamlanmadan sayfa yeniden
+    # başlayabilir ve yazma kaybolabilir. Kısa bir bekleme bu riski azaltır.
+    time.sleep(0.35)
 
 
 def cihaz_bugun_kullandi_mi(cookie_adi: str, gun: str) -> bool:
