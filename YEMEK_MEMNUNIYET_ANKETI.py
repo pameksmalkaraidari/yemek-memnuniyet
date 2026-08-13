@@ -1,7 +1,5 @@
 import re
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import io
 import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -60,127 +58,86 @@ def simdi_tr() -> datetime:
     return datetime.now(TR_TZ)
 
 
-def mail_gonder(konu: str, govde_html: str):
-    """secrets.toml içindeki [email] ayarlarını kullanarak HTML gövdeli
-    bir e-posta gönderir. Ayarlar eksikse veya gönderim başarısız olursa
-    açıklayıcı bir hata fırlatır (çağıran taraf yakalayıp gösterir)."""
-    email_ayarlari = st.secrets.get("email", None)
-    if not email_ayarlari:
-        raise RuntimeError(
-            "secrets.toml içinde '[email]' bölümü bulunamadı. Lütfen gonderen_email, "
-            "gonderen_sifre, alici_epostalar, smtp_sunucu ve smtp_port ayarlarını ekle."
-        )
-
-    gonderen = email_ayarlari["gonderen_email"]
-    sifre = email_ayarlari["gonderen_sifre"]
-    aliciler = email_ayarlari["alici_epostalar"]
-    if isinstance(aliciler, str):
-        aliciler = [a.strip() for a in aliciler.split(",") if a.strip()]
-    smtp_sunucu = email_ayarlari.get("smtp_sunucu", "smtp.gmail.com")
-    smtp_port = int(email_ayarlari.get("smtp_port", 465))
-
-    mesaj = MIMEMultipart("alternative")
-    mesaj["Subject"] = konu
-    mesaj["From"] = gonderen
-    mesaj["To"] = ", ".join(aliciler)
-    mesaj.attach(MIMEText(govde_html, "html", "utf-8"))
-
-    if smtp_port == 465:
-        # 465: baştan itibaren şifreli bağlantı (SSL) — Gmail'in klasik yöntemi
-        with smtplib.SMTP_SSL(smtp_sunucu, smtp_port) as sunucu:
-            sunucu.login(gonderen, sifre)
-            sunucu.sendmail(gonderen, aliciler, mesaj.as_string())
-    else:
-        # 587 (ve çoğu şirket maili / Microsoft 365 vb.): önce düz bağlan,
-        # sonra STARTTLS ile şifreli hale getir
-        with smtplib.SMTP(smtp_sunucu, smtp_port) as sunucu:
-            sunucu.starttls()
-            sunucu.login(gonderen, sifre)
-            sunucu.sendmail(gonderen, aliciler, mesaj.as_string())
-
-
-def gunluk_ozet_html(
+def gunluk_ozet_excel(
     tarih_str: str,
     df_on: pd.DataFrame,
     df_son: pd.DataFrame,
     df_oneri: pd.DataFrame,
-    df_menu: pd.DataFrame = None,
-) -> str:
-    """Belirtilen tarih için o günün menüsü, ön oylama, ürün değerlendirmesi
-    ve öneri verilerinden sade bir HTML e-posta gövdesi üretir."""
-    gun = gun_adi(tarih_str)
-    parcalar = [f"<h2>🍽️ Günlük Yemek Raporu — {tarih_str} {gun}</h2>"]
-
-    # O günün menüsü (varsa) — hem ön oylama hem de değerlendirme
-    # bölümlerinde hangi yemeklerden bahsedildiğini anlamak için üstte
-    # tek seferde gösteriliyor.
-    menu_satiri = None
-    if df_menu is not None and not df_menu.empty and "Tarih" in df_menu.columns:
-        eslesen_menu = df_menu[df_menu["Tarih"] == tarih_str]
-        if not eslesen_menu.empty:
-            menu_satiri = eslesen_menu.iloc[0]
-            menu_ogeleri = [
-                f"{kolon}: {menu_satiri[kolon]}"
-                for kolon in df_menu.columns
-                if kolon != "Tarih" and str(menu_satiri[kolon]).strip()
-            ]
-            if menu_ogeleri:
-                parcalar.append("<p><b>🍲 Günün Menüsü:</b> " + " · ".join(menu_ogeleri) + "</p>")
-
-    # Ön oylama özeti
-    on_bugun = df_on[df_on["Tarih"] == tarih_str] if not df_on.empty and "Tarih" in df_on.columns else pd.DataFrame()
-    if on_bugun.empty:
-        parcalar.append("<p><b>Ön Oylama:</b> Bugün için ön oylama verisi yok.</p>")
-    else:
-        iyi = (on_bugun["Degerlendirme"] == "İyi").sum()
-        kotu = (on_bugun["Degerlendirme"] == "Kötü").sum()
-        toplam = len(on_bugun)
-        oran = (iyi / toplam * 100) if toplam else 0
-        parcalar.append(
-            f"<p><b>Ön Oylama:</b> {toplam} oy — 👍 {iyi} İyi, 👎 {kotu} Kötü "
-            f"(İyi oranı: %{oran:.0f})</p>"
+    df_menu: pd.DataFrame,
+) -> bytes:
+    """Belirtilen tarih için o günün menüsü, ön oylama, yemek bazlı
+    değerlendirme ve öneri verilerinden çok sayfalı bir Excel dosyası
+    (bytes) üretir."""
+    tampon = io.BytesIO()
+    with pd.ExcelWriter(tampon, engine="openpyxl") as yazici:
+        # --- Menü sayfası ---
+        menu_satirlari = []
+        if df_menu is not None and not df_menu.empty and "Tarih" in df_menu.columns:
+            eslesen_menu = df_menu[df_menu["Tarih"] == tarih_str]
+            if not eslesen_menu.empty:
+                menu_satiri = eslesen_menu.iloc[0]
+                for kolon in df_menu.columns:
+                    if kolon != "Tarih" and str(menu_satiri[kolon]).strip():
+                        menu_satirlari.append({"Kalem": kolon, "Yemek": menu_satiri[kolon]})
+        pd.DataFrame(menu_satirlari if menu_satirlari else [{"Kalem": "-", "Yemek": "Menü bulunamadı"}]).to_excel(
+            yazici, sheet_name="Günün Menüsü", index=False
         )
 
-    # Ürün bazlı değerlendirme özeti — kategori (Çorba/Ana Yemek gibi)
-    # yerine gerçek yemek adına (UrunAdi) göre gruplanıyor, böylece
-    # rapor "Çorba: 4 güzel" yerine "Mercimek Çorbası: 4 güzel" gösteriyor.
-    son_bugun = df_son[df_son["Tarih"] == tarih_str] if not df_son.empty and "Tarih" in df_son.columns else pd.DataFrame()
-    if son_bugun.empty:
-        parcalar.append("<p><b>Yemek Sonrası Değerlendirme:</b> Bugün için değerlendirme verisi yok.</p>")
-    else:
-        son_bugun = son_bugun.copy()
-        son_bugun["_kategori"] = son_bugun["Degerlendirme"].apply(puan_kategorisi)
-        son_bugun["_urun_etiketi"] = son_bugun.apply(
-            lambda satir: f"{satir['UrunAdi']} ({satir['Kalem']})"
-            if str(satir.get("UrunAdi", "")).strip()
-            else satir["Kalem"],
-            axis=1,
-        )
-        pivot = son_bugun.pivot_table(
-            index="_urun_etiketi", columns="_kategori", values="Tarih", aggfunc="count", fill_value=0
-        )
-        for sutun in ["Güzel", "Orta", "Kötü"]:
-            if sutun not in pivot.columns:
-                pivot[sutun] = 0
-        pivot = pivot[["Güzel", "Orta", "Kötü"]]
-        pivot.index.name = "Yemek"
-        parcalar.append("<p><b>Yemek Sonrası Değerlendirme (1-5 puan, 1-2: Kötü, 3: Orta, 4-5: Güzel):</b></p>")
-        parcalar.append(pivot.to_html(border=1))
+        # --- Ön oylama sayfası ---
+        on_bugun = df_on[df_on["Tarih"] == tarih_str] if not df_on.empty and "Tarih" in df_on.columns else pd.DataFrame()
+        if on_bugun.empty:
+            pd.DataFrame([{"Sonuç": "Bugün için ön oylama verisi yok."}]).to_excel(
+                yazici, sheet_name="Ön Oylama", index=False
+            )
+        else:
+            iyi = int((on_bugun["Degerlendirme"] == "İyi").sum())
+            kotu = int((on_bugun["Degerlendirme"] == "Kötü").sum())
+            toplam = len(on_bugun)
+            oran = round((iyi / toplam * 100), 1) if toplam else 0
+            pd.DataFrame(
+                [{"Toplam Oy": toplam, "İyi": iyi, "Kötü": kotu, "İyi Oranı (%)": oran}]
+            ).to_excel(yazici, sheet_name="Ön Oylama", index=False)
 
-        kotuler = son_bugun[son_bugun["_kategori"] == "Kötü"]
-        if not kotuler.empty:
-            parcalar.append("<p><b>⚠️ Kötü Değerlendirmeler (1-2 puan):</b></p>")
-            parcalar.append(
-                kotuler[["Kalem", "UrunAdi", "Degerlendirme", "Aciklama"]].to_html(index=False, border=1)
+        # --- Yemek bazlı değerlendirme sayfası (kategori değil, gerçek yemek adı) ---
+        son_bugun = df_son[df_son["Tarih"] == tarih_str] if not df_son.empty and "Tarih" in df_son.columns else pd.DataFrame()
+        if son_bugun.empty:
+            pd.DataFrame([{"Sonuç": "Bugün için değerlendirme verisi yok."}]).to_excel(
+                yazici, sheet_name="Yemek Değerlendirme", index=False
+            )
+        else:
+            son_bugun = son_bugun.copy()
+            son_bugun["_kategori"] = son_bugun["Degerlendirme"].apply(puan_kategorisi)
+            son_bugun["_yemek"] = son_bugun.apply(
+                lambda satir: satir["UrunAdi"] if str(satir.get("UrunAdi", "")).strip() else satir["Kalem"],
+                axis=1,
+            )
+            pivot = son_bugun.pivot_table(
+                index="_yemek", columns="_kategori", values="Tarih", aggfunc="count", fill_value=0
+            )
+            for sutun in ["Güzel", "Orta", "Kötü"]:
+                if sutun not in pivot.columns:
+                    pivot[sutun] = 0
+            pivot = pivot[["Güzel", "Orta", "Kötü"]]
+            pivot["Ortalama Puan"] = son_bugun.groupby("_yemek")["Degerlendirme"].apply(
+                lambda x: pd.to_numeric(x, errors="coerce").mean()
+            ).round(2)
+            pivot.index.name = "Yemek"
+            pivot.reset_index().to_excel(yazici, sheet_name="Yemek Değerlendirme", index=False)
+
+            kotuler = son_bugun[son_bugun["_kategori"] == "Kötü"]
+            if not kotuler.empty:
+                kotuler[["Kalem", "UrunAdi", "Degerlendirme", "Aciklama"]].rename(
+                    columns={"Kalem": "Öğün Kalemi", "UrunAdi": "Yemek", "Degerlendirme": "Puan", "Aciklama": "Açıklama"}
+                ).to_excel(yazici, sheet_name="Kötü Değerlendirmeler", index=False)
+
+        # --- Öneri/şikayet sayfası ---
+        oneri_bugun = df_oneri[df_oneri["Tarih"] == tarih_str] if not df_oneri.empty and "Tarih" in df_oneri.columns else pd.DataFrame()
+        if not oneri_bugun.empty:
+            oneri_bugun[["Oneri"]].rename(columns={"Oneri": "Öneri / Şikâyet"}).to_excel(
+                yazici, sheet_name="Öneriler", index=False
             )
 
-    # Öneriler
-    oneri_bugun = df_oneri[df_oneri["Tarih"] == tarih_str] if not df_oneri.empty and "Tarih" in df_oneri.columns else pd.DataFrame()
-    if not oneri_bugun.empty:
-        parcalar.append("<p><b>💡 Bugünkü Menü Önerileri:</b></p>")
-        parcalar.append(oneri_bugun[["Oneri"]].to_html(index=False, border=1))
-
-    return "<br>".join(parcalar)
+    return tampon.getvalue()
 
 
 @st.cache_resource(show_spinner=False)
@@ -948,24 +905,27 @@ if yonetici_erisimi:
                     )
 
                 st.divider()
-                st.markdown("### 📧 Günlük Raporu Mail Gönder")
-                gonderilecek_tarih = st.date_input(
-                    "Hangi günün raporu gönderilsin?",
+                st.markdown("### 📊 Günlük Raporu Excel Olarak İndir")
+                secilen_rapor_tarihi = st.date_input(
+                    "Hangi günün raporu indirilsin?",
                     value=simdi_tr().date(),
                     format="DD.MM.YYYY",
-                    key="mail_tarih_secimi",
+                    key="excel_rapor_tarih_secimi",
                 )
-                gonderilecek_tarih_str = gonderilecek_tarih.strftime(TARIH_FORMAT)
+                secilen_rapor_tarihi_str = secilen_rapor_tarihi.strftime(TARIH_FORMAT)
 
-                if st.button("📧 Bu Günün Raporunu Mail Gönder"):
-                    try:
-                        govde = gunluk_ozet_html(gonderilecek_tarih_str, df_on, df_son, df_oneri, df_menu)
-                        mail_gonder(
-                            f"🍽️ Günlük Yemek Raporu — {gonderilecek_tarih_str}", govde
-                        )
-                        st.success("Rapor e-posta ile gönderildi!")
-                    except Exception as e:
-                        st.error(f"Mail gönderilirken hata oluştu: {e}")
+                try:
+                    excel_verisi = gunluk_ozet_excel(
+                        secilen_rapor_tarihi_str, df_on, df_son, df_oneri, df_menu
+                    )
+                    st.download_button(
+                        "⬇️ Excel Raporunu İndir",
+                        data=excel_verisi,
+                        file_name=f"gunluk_yemek_raporu_{secilen_rapor_tarihi.strftime('%d_%m_%Y')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                except Exception as e:
+                    st.error(f"Excel raporu oluşturulurken hata oluştu: {e}")
 
                 st.divider()
                 if st.button("🔄 Verileri Yenile"):
