@@ -49,6 +49,7 @@ TR_TZ = ZoneInfo("Europe/Istanbul")
 # da gizli sekme kullanan biri yine de tekrar oy kullanabilir.
 COOKIE_ON_OYLAMA = "yemek_on_oylanan_gunler"
 COOKIE_SON_DEGERLENDIRME = "yemek_son_degerlendirilen_gunler"
+COOKIE_ONERI = "yemek_oneri_yapilan_gunler"
 COOKIE_GECERLILIK_GUN = 120
 
 
@@ -373,6 +374,25 @@ def cihaza_oylanan_gun_ekle(cookie_adi: str, mevcut_kume: set, yeni_tarih: str):
     )
 
 
+def cihaz_bugun_kullandi_mi(cookie_adi: str, gun: str) -> bool:
+    """Bu cihaz, belirtilen gün için bu formu daha önce kullandı mı?
+    Önce oturum durumuna (session_state) bakar — çerez tarayıcıya yazılırken
+    kısa bir gecikme olabildiği için, aynı oturumda hemen art arda tekrar
+    gönderimi engellemenin tek güvenilir yolu budur. Çerez ise farklı bir
+    oturumda (tarayıcı kapatılıp açıldığında) devreye girer."""
+    oturum_anahtari = f"_cihaz_kullanildi_{cookie_adi}_{gun}"
+    if st.session_state.get(oturum_anahtari, False):
+        return True
+    return gun in cihazda_oylanan_gunleri_oku(cookie_adi)
+
+
+def cihazi_bugun_icin_isaretle(cookie_adi: str, mevcut_kume: set, gun: str):
+    """Hem oturum durumunu hem de çerezi günceller."""
+    oturum_anahtari = f"_cihaz_kullanildi_{cookie_adi}_{gun}"
+    st.session_state[oturum_anahtari] = True
+    cihaza_oylanan_gun_ekle(cookie_adi, mevcut_kume, gun)
+
+
 st.markdown(
     """
     <style>
@@ -502,7 +522,7 @@ with tab_degerlendirme:
 
     if gunun_menusu is None:
         st.info("Bugün için sisteme henüz bir menü girilmemiş.")
-    elif bugun_str in cihazda_degerlendirilen:
+    elif cihaz_bugun_kullandi_mi(COOKIE_SON_DEGERLENDIRME, bugun_str):
         st.success("✅ Bu cihazdan bugün için değerlendirmeni zaten gönderdin. Teşekkürler!")
     else:
         urun_kolonlari = [
@@ -561,7 +581,7 @@ with tab_degerlendirme:
                                 zaman,
                             ],
                         )
-                    cihaza_oylanan_gun_ekle(COOKIE_SON_DEGERLENDIRME, cihazda_degerlendirilen, bugun_str)
+                    cihazi_bugun_icin_isaretle(COOKIE_SON_DEGERLENDIRME, cihazda_degerlendirilen, bugun_str)
                     st.success("Teşekkürler! Değerlendirmeniz yönetim ekibine iletildi.")
                     st.rerun()
                 except Exception as e:
@@ -570,24 +590,32 @@ with tab_degerlendirme:
 # --- TAB 3: Menü Önerisi ---
 with tab3:
     st.subheader("Menü Önerin Var mı? Veya Herhangi bir konuda şikâyetin var mı?")
-    with st.form("oneri_form"):
-        oneri_metni = st.text_area(
-            "Önerini yaz:",
-            placeholder="Örn: Ayda bir kere mercimek köftesi olabilir. Veya yemekte herhangi bir cisim çıktı gibi...",
-        )
-        oneri_submit = st.form_submit_button("Öneriyi Gönder")
-        if oneri_submit:
-            if oneri_metni.strip():
-                try:
-                    satir_ekle(
-                        ws_oneri,
-                        [bugun_str, oneri_metni, simdi_tr().strftime("%d.%m.%Y %H:%M:%S")],
-                    )
-                    st.success("Teşekkürler! Önerin kaydedildi.")
-                except Exception as e:
-                    st.error(f"Kayıt sırasında hata oluştu: {e}")
-            else:
-                st.warning("Lütfen bir öneri yazın.")
+
+    cihazda_oneri_yapilan = cihazda_oylanan_gunleri_oku(COOKIE_ONERI)
+
+    if cihaz_bugun_kullandi_mi(COOKIE_ONERI, bugun_str):
+        st.success("✅ Bu cihazdan bugün için zaten bir öneri/şikâyet gönderdin. Teşekkürler!")
+    else:
+        with st.form("oneri_form"):
+            oneri_metni = st.text_area(
+                "Önerini yaz:",
+                placeholder="Örn: Ayda bir kere mercimek köftesi olabilir. Veya yemekte herhangi bir cisim çıktı gibi...",
+            )
+            oneri_submit = st.form_submit_button("Öneriyi Gönder")
+            if oneri_submit:
+                if oneri_metni.strip():
+                    try:
+                        satir_ekle(
+                            ws_oneri,
+                            [bugun_str, oneri_metni, simdi_tr().strftime("%d.%m.%Y %H:%M:%S")],
+                        )
+                        cihazi_bugun_icin_isaretle(COOKIE_ONERI, cihazda_oneri_yapilan, bugun_str)
+                        st.success("Teşekkürler! Önerin kaydedildi.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Kayıt sırasında hata oluştu: {e}")
+                else:
+                    st.warning("Lütfen bir öneri yazın.")
 
 # =========================================================
 # YÖNETİCİ PANELİ
