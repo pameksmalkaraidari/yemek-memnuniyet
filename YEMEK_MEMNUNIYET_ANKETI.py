@@ -1,11 +1,14 @@
 import re
-import io
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+from streamlit_cookies_controller import CookieController
 
 # =========================================================
 # SAYFA YAPILANDIRMASI
@@ -35,10 +38,18 @@ WS_MENU = "GunlukMenu"
 WS_ON = "OnOylama"
 WS_SON = "SonDegerlendirme"
 WS_ONERI = "MenuOneri"
-WS_ZIYARET = "Ziyaretler"
 
 TARIH_FORMAT = "%d.%m.%Y"
 TR_TZ = ZoneInfo("Europe/Istanbul")
+
+# Aynı cihazdan/tarayıcıdan tekrar oy kullanımını engellemek için kullanılan
+# çerez adları. Değerler, o cihazda hangi günlerin zaten oylandığını virgülle
+# ayrılmış tarih listesi olarak tutar. Bu bir güvenlik önlemi DEĞİL, sıradan
+# tekrar tıklamaları engelleyen bir sürtünme katmanıdır — çerezini silen ya
+# da gizli sekme kullanan biri yine de tekrar oy kullanabilir.
+COOKIE_ON_OYLAMA = "yemek_on_oylanan_gunler"
+COOKIE_SON_DEGERLENDIRME = "yemek_son_degerlendirilen_gunler"
+COOKIE_GECERLILIK_GUN = 120
 
 
 def simdi_tr() -> datetime:
@@ -48,16 +59,94 @@ def simdi_tr() -> datetime:
     return datetime.now(TR_TZ)
 
 
-def excel_olustur(sayfalar: dict) -> bytes:
-    """{sayfa_adi: DataFrame} sözlüğünden çok sayfalı bir Excel dosyası (bytes)
-    üretir. Streamlit'in indirme butonuna doğrudan verilebilir."""
-    tampon = io.BytesIO()
-    with pd.ExcelWriter(tampon, engine="openpyxl") as yazici:
-        for sayfa_adi, df in sayfalar.items():
-            (df if not df.empty else pd.DataFrame({"Bilgi": ["Veri yok"]})).to_excel(
-                yazici, sheet_name=sayfa_adi[:31], index=False
+def mail_gonder(konu: str, govde_html: str):
+    """secrets.toml içindeki [email] ayarlarını kullanarak HTML gövdeli
+    bir e-posta gönderir. Ayarlar eksikse veya gönderim başarısız olursa
+    açıklayıcı bir hata fırlatır (çağıran taraf yakalayıp gösterir)."""
+    email_ayarlari = st.secrets.get("email", None)
+    if not email_ayarlari:
+        raise RuntimeError(
+            "secrets.toml içinde '[email]' bölümü bulunamadı. Lütfen gonderen_email, "
+            "gonderen_sifre, alici_epostalar, smtp_sunucu ve smtp_port ayarlarını ekle."
+        )
+
+    gonderen = email_ayarlari["gonderen_email"]
+    sifre = email_ayarlari["gonderen_sifre"]
+    aliciler = email_ayarlari["alici_epostalar"]
+    if isinstance(aliciler, str):
+        aliciler = [a.strip() for a in aliciler.split(",") if a.strip()]
+    smtp_sunucu = email_ayarlari.get("smtp_sunucu", "smtp.gmail.com")
+    smtp_port = int(email_ayarlari.get("smtp_port", 465))
+
+    mesaj = MIMEMultipart("alternative")
+    mesaj["Subject"] = konu
+    mesaj["From"] = gonderen
+    mesaj["To"] = ", ".join(aliciler)
+    mesaj.attach(MIMEText(govde_html, "html", "utf-8"))
+
+    if smtp_port == 465:
+        # 465: baştan itibaren şifreli bağlantı (SSL) — Gmail'in klasik yöntemi
+        with smtplib.SMTP_SSL(smtp_sunucu, smtp_port) as sunucu:
+            sunucu.login(gonderen, sifre)
+            sunucu.sendmail(gonderen, aliciler, mesaj.as_string())
+    else:
+        # 587 (ve çoğu şirket maili / Microsoft 365 vb.): önce düz bağlan,
+        # sonra STARTTLS ile şifreli hale getir
+        with smtplib.SMTP(smtp_sunucu, smtp_port) as sunucu:
+            sunucu.starttls()
+            sunucu.login(gonderen, sifre)
+            sunucu.sendmail(gonderen, aliciler, mesaj.as_string())
+
+
+def gunluk_ozet_html(tarih_str: str, df_on: pd.DataFrame, df_son: pd.DataFrame, df_oneri: pd.DataFrame) -> str:
+    """Belirtilen tarih için ön oylama, ürün değerlendirmesi ve öneri
+    verilerinden sade bir HTML e-posta gövdesi üretir."""
+    gun = gun_adi(tarih_str)
+    parcalar = [f"<h2>🍽️ Günlük Yemek Raporu — {tarih_str} {gun}</h2>"]
+
+    # Ön oylama özeti
+    on_bugun = df_on[df_on["Tarih"] == tarih_str] if not df_on.empty and "Tarih" in df_on.columns else pd.DataFrame()
+    if on_bugun.empty:
+        parcalar.append("<p><b>Ön Oylama:</b> Bugün için ön oylama verisi yok.</p>")
+    else:
+        iyi = (on_bugun["Degerlendirme"] == "İyi").sum()
+        kotu = (on_bugun["Degerlendirme"] == "Kötü").sum()
+        toplam = len(on_bugun)
+        oran = (iyi / toplam * 100) if toplam else 0
+        parcalar.append(
+            f"<p><b>Ön Oylama:</b> {toplam} oy — 👍 {iyi} İyi, 👎 {kotu} Kötü "
+            f"(İyi oranı: %{oran:.0f})</p>"
+        )
+
+    # Ürün bazlı değerlendirme özeti
+    son_bugun = df_son[df_son["Tarih"] == tarih_str] if not df_son.empty and "Tarih" in df_son.columns else pd.DataFrame()
+    if son_bugun.empty:
+        parcalar.append("<p><b>Yemek Sonrası Değerlendirme:</b> Bugün için değerlendirme verisi yok.</p>")
+    else:
+        pivot = son_bugun.pivot_table(
+            index="Kalem", columns="Degerlendirme", values="Tarih", aggfunc="count", fill_value=0
+        )
+        for sutun in ["Güzel", "Orta", "Kötü"]:
+            if sutun not in pivot.columns:
+                pivot[sutun] = 0
+        pivot = pivot[["Güzel", "Orta", "Kötü"]]
+        parcalar.append("<p><b>Yemek Sonrası Değerlendirme:</b></p>")
+        parcalar.append(pivot.to_html(border=1))
+
+        kotuler = son_bugun[son_bugun["Degerlendirme"] == "Kötü"]
+        if not kotuler.empty:
+            parcalar.append("<p><b>⚠️ Kötü Değerlendirmeler:</b></p>")
+            parcalar.append(
+                kotuler[["Kalem", "UrunAdi", "Aciklama"]].to_html(index=False, border=1)
             )
-    return tampon.getvalue()
+
+    # Öneriler
+    oneri_bugun = df_oneri[df_oneri["Tarih"] == tarih_str] if not df_oneri.empty and "Tarih" in df_oneri.columns else pd.DataFrame()
+    if not oneri_bugun.empty:
+        parcalar.append("<p><b>💡 Bugünkü Menü Önerileri:</b></p>")
+        parcalar.append(oneri_bugun[["Oneri"]].to_html(index=False, border=1))
+
+    return "<br>".join(parcalar)
 
 
 @st.cache_resource(show_spinner=False)
@@ -193,11 +282,6 @@ def bugunun_menusu(df_menu: pd.DataFrame):
     return eslesen.iloc[0]
 
 
-AY_ADLARI_TR = [
-    "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
-    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık",
-]
-
 GUN_ADLARI_TR = [
     "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar",
 ]
@@ -235,7 +319,6 @@ try:
     ws_on = worksheet_al(spreadsheet, WS_ON, ["Tarih", "Degerlendirme", "KayitZamani"])
     ws_son = worksheet_al(spreadsheet, WS_SON, ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"])
     ws_oneri = worksheet_al(spreadsheet, WS_ONERI, ["Tarih", "Oneri", "KayitZamani"])
-    ws_ziyaret = worksheet_al(spreadsheet, WS_ZIYARET, ["Tarih", "KayitZamani"])
 except Exception as e:
     st.error(
         "⚠️ Google Sheets ile iletişimde bir sorun oluştu. Bu genellikle Google'ın "
@@ -250,6 +333,30 @@ except Exception as e:
 # =========================================================
 # ARAYÜZ
 # =========================================================
+cookies = CookieController()
+
+
+def cihazda_oylanan_gunleri_oku(cookie_adi: str) -> set:
+    """İlgili çerezden, bu cihazda daha önce oylanmış/değerlendirilmiş
+    günlerin tarih kümesini okur. Çerez henüz yüklenmemişse (sayfanın ilk
+    açılış anı) boş küme döner — bu durumda geçici olarak tekrar oy
+    engellenemez, ama bir sonraki etkileşimde çerez devreye girer."""
+    ham = cookies.get(cookie_adi)
+    if not ham:
+        return set()
+    return {t for t in str(ham).split(",") if t}
+
+
+def cihaza_oylanan_gun_ekle(cookie_adi: str, mevcut_kume: set, yeni_tarih: str):
+    """Kümeye yeni tarihi ekleyip aynı çerez adına geri yazar."""
+    guncel = mevcut_kume | {yeni_tarih}
+    cookies.set(
+        cookie_adi,
+        ",".join(sorted(guncel)),
+        max_age=60 * 60 * 24 * COOKIE_GECERLILIK_GUN,
+    )
+
+
 st.markdown(
     """
     <style>
@@ -282,20 +389,6 @@ st.markdown(
         margin-top: -8px;
         margin-bottom: 4px;
     }
-    /* Ana bölüm seçim radyo butonlarını büyük, dokunması kolay kartlar gibi göster
-       (sadece .st-key-ana_bolum_kutusu içindeki radio'ya uygulanır, formlardaki
-       diğer radio'ları -örn. Güzel/Orta/Kötü- etkilemez) */
-    .st-key-ana_bolum_kutusu div[data-testid="stRadio"] > div {
-        gap: 10px;
-    }
-    .st-key-ana_bolum_kutusu div[data-testid="stRadio"] label {
-        border: 1px solid #dddddd;
-        border-radius: 10px;
-        padding: 12px 14px;
-        width: 100%;
-        font-size: 16px;
-        font-weight: 600;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -309,34 +402,12 @@ df_menu = df_oku(ws_menu, WS_MENU)
 gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = simdi_tr().strftime(TARIH_FORMAT)
 
-# Yönetici erişimini burada belirliyoruz ki hem ziyaret sayacı hem de
-# aşağıdaki yönetici paneli aynı değeri kullansın.
-yonetici_erisimi = "admin" in st.query_params
+tab_degerlendirme, tab_on_oylama, tab3 = st.tabs(
+    ["✅ Günün Menüsünü Değerlendirme", "📅 Aylık Menü Oylama", "💡 Dilek-Şikâyet-Öneri"]
+)
 
-# --- Ziyaretçi sayacı ---
-# Her oturumda (tarayıcı sekmesi/telefon) sadece BİR KEZ kaydediyoruz;
-# Streamlit her etkileşimde script'i baştan çalıştırdığı için session_state
-# olmadan her tıklamada ayrı bir ziyaret sayılırdı. Yönetici erişimi
-# (?admin=1) sayaca dahil edilmiyor ki rakam gerçek kullanıcıları yansıtsın.
-if not yonetici_erisimi and "ziyaret_kaydedildi" not in st.session_state:
-    try:
-        satir_ekle(ws_ziyaret, [bugun_str, simdi_tr().strftime("%d.%m.%Y %H:%M:%S")])
-    except Exception:
-        pass  # ziyaret kaydı başarısız olsa bile kullanıcı deneyimi etkilenmesin
-    st.session_state.ziyaret_kaydedildi = True
-
-st.markdown("#### Ne yapmak istersin?")
-with st.container(key="ana_bolum_kutusu"):
-    secim = st.radio(
-        "Bölüm seç",
-        ["✅ Günün Menüsünü Değerlendirme", "📅 Aylık Menü Oylama", "💡 Dilek-Şikâyet-Öneri"],
-        label_visibility="collapsed",
-        key="ana_bolum_secimi",
-    )
-st.divider()
-
-# --- BÖLÜM: Aylık Menü & Ön Oylama ---
-if secim == "📅 Aylık Menü Oylama":
+# --- TAB 1: Aylık Menü & Ön Oylama ---
+with tab_on_oylama:
     if df_menu.empty:
         st.info("Sisteme henüz bir menü yüklenmemiş.")
     else:
@@ -350,6 +421,11 @@ if secim == "📅 Aylık Menü Oylama":
         # Geçmişte kalan günleri (bugünden önceki) oylamadan çıkar
         bugun_tarihi = pd.to_datetime(bugun_str, format=TARIH_FORMAT)
         df_menu_sirali = df_menu_sirali[df_menu_sirali["_siralama"] >= bugun_tarihi].reset_index(drop=True)
+
+        # Bu cihazda daha önce (önceki bir oturumda dahil) oylanmış günleri çıkar
+        cihazda_oylanan = cihazda_oylanan_gunleri_oku(COOKIE_ON_OYLAMA)
+        df_menu_sirali_tum = df_menu_sirali.copy()  # tablo görünümü için orijinali sakla
+        df_menu_sirali = df_menu_sirali[~df_menu_sirali["Tarih"].isin(cihazda_oylanan)].reset_index(drop=True)
 
         gun_listesi = df_menu_sirali["Tarih"].tolist()
 
@@ -381,6 +457,7 @@ if secim == "📅 Aylık Menü Oylama":
             def _oy_kaydet_ve_ilerle(tarih, deger):
                 try:
                     satir_ekle(ws_on, [tarih, deger, simdi_tr().strftime("%d.%m.%Y %H:%M:%S")])
+                    cihaza_oylanan_gun_ekle(COOKIE_ON_OYLAMA, cihazda_oylanan, tarih)
                     st.session_state.on_oylama_indeks += 1
                     st.rerun()
                 except Exception as e:
@@ -394,19 +471,23 @@ if secim == "📅 Aylık Menü Oylama":
         st.divider()
         with st.expander("📅 Aylık Menü Tablosunu Gör"):
             st.dataframe(
-                df_menu_sirali.drop(columns=["_siralama"]),
+                df_menu_sirali_tum.drop(columns=["_siralama"]),
                 use_container_width=True,
                 hide_index=True,
             )
 
 
-# --- BÖLÜM: Yemek Sonrası Değerlendirme ---
-if secim == "✅ Günün Menüsünü Değerlendirme":
+# --- TAB 2: Yemek Sonrası Değerlendirme ---
+with tab_degerlendirme:
     st.subheader(f"Bugünkü Yemekler Nasıldı? — {bugun_str}")
     st.markdown(f'<div class="gun-adi-etiket">📆 {gun_adi(bugun_str)}</div>', unsafe_allow_html=True)
 
+    cihazda_degerlendirilen = cihazda_oylanan_gunleri_oku(COOKIE_SON_DEGERLENDIRME)
+
     if gunun_menusu is None:
         st.info("Bugün için sisteme henüz bir menü girilmemiş.")
+    elif bugun_str in cihazda_degerlendirilen:
+        st.success("✅ Bu cihazdan bugün için değerlendirmeni zaten gönderdin. Teşekkürler!")
     else:
         urun_kolonlari = [
             k for k in df_menu.columns
@@ -464,12 +545,14 @@ if secim == "✅ Günün Menüsünü Değerlendirme":
                                 zaman,
                             ],
                         )
+                    cihaza_oylanan_gun_ekle(COOKIE_SON_DEGERLENDIRME, cihazda_degerlendirilen, bugun_str)
                     st.success("Teşekkürler! Değerlendirmeniz yönetim ekibine iletildi.")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Kayıt sırasında hata oluştu: {e}")
 
-# --- BÖLÜM: Menü Önerisi ---
-if secim == "💡 Dilek-Şikâyet-Öneri":
+# --- TAB 3: Menü Önerisi ---
+with tab3:
     st.subheader("Menü Önerin Var mı? Veya Herhangi bir konuda şikâyetin var mı?")
     with st.form("oneri_form"):
         oneri_metni = st.text_area(
@@ -493,6 +576,8 @@ if secim == "💡 Dilek-Şikâyet-Öneri":
 # =========================================================
 # YÖNETİCİ PANELİ
 # =========================================================
+yonetici_erisimi = "admin" in st.query_params
+
 if yonetici_erisimi:
     with st.expander("🔒 Yönetici Paneli (Yetkili Girişi)", expanded=False):
 
@@ -678,225 +763,99 @@ if yonetici_erisimi:
                 df_oku(ws_oneri, WS_ONERI), ["Tarih", "Oneri", "KayitZamani"], WS_ONERI
             )
 
-            # --- Ziyaretçi Sayısı ---
-            st.markdown("### 👥 Ziyaretçi Sayısı")
-            df_ziyaret = df_oku(ws_ziyaret, WS_ZIYARET)
-            if df_ziyaret.empty or "Tarih" not in df_ziyaret.columns:
-                st.info("Henüz kayıtlı ziyaret yok.")
-            else:
-                bugun_tarih_obj = pd.to_datetime(bugun_str, format=TARIH_FORMAT)
-                ziyaret_tarihleri = pd.to_datetime(
-                    df_ziyaret["Tarih"], format=TARIH_FORMAT, errors="coerce"
-                )
-                bugun_ziyaret = (df_ziyaret["Tarih"] == bugun_str).sum()
-                bu_ay_ziyaret = (
-                    (ziyaret_tarihleri.dt.year == bugun_tarih_obj.year)
-                    & (ziyaret_tarihleri.dt.month == bugun_tarih_obj.month)
-                ).sum()
-                toplam_ziyaret = len(df_ziyaret)
-
-                v1, v2, v3 = st.columns(3)
-                v1.metric("Bugün", int(bugun_ziyaret))
-                v2.metric(f"{AY_ADLARI_TR[bugun_tarih_obj.month - 1]} Ayı", int(bu_ay_ziyaret))
-                v3.metric("Toplam (Tüm Zamanlar)", int(toplam_ziyaret))
-
-                with st.expander("📈 Günlük Ziyaretçi Trendi"):
-                    gunluk_ziyaret = df_ziyaret.groupby("Tarih").size()
-                    gunluk_ziyaret.index = pd.to_datetime(
-                        gunluk_ziyaret.index, format=TARIH_FORMAT, errors="coerce"
-                    )
-                    st.line_chart(gunluk_ziyaret.sort_index())
-
-            st.divider()
-
             if df_on.empty and df_son.empty:
                 st.info("Henüz hiç oylama verisi yok.")
             else:
-                def _tarih_seti(df):
-                    return set(df["Tarih"]) if not df.empty and "Tarih" in df.columns else set()
-
-                tum_tarihler = sorted(
-                    _tarih_seti(df_on) | _tarih_seti(df_son) | _tarih_seti(df_oneri),
-                    key=lambda t: pd.to_datetime(t, format=TARIH_FORMAT, errors="coerce"),
-                    reverse=True,
+                st.markdown("### 📊 Özet")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Ön Oylama Sayısı", len(df_on))
+                iyi_orani = (
+                    (df_on["Degerlendirme"] == "İyi").mean() * 100 if not df_on.empty else 0
                 )
-
-                rapor_turu = st.radio(
-                    "Rapor türü",
-                    ["📆 Günlük Rapor", "📊 Aylık / Genel Özet"],
-                    horizontal=True,
-                    key="rapor_turu_secimi",
+                m2.metric("Ön Oylama İyi Oranı", f"%{iyi_orani:.0f}" if not df_on.empty else "—")
+                m3.metric("Toplam Ürün Değerlendirmesi", len(df_son))
+                kotu_orani = (
+                    (df_son["Degerlendirme"] == "Kötü").mean() * 100 if not df_son.empty else 0
                 )
+                m4.metric("Kötü Oranı", f"%{kotu_orani:.0f}" if not df_son.empty else "—")
+
                 st.divider()
-
-                # =====================================================
-                # GÜNLÜK RAPOR — tek bir günü seçip net şekilde inceleme
-                # =====================================================
-                if rapor_turu == "📆 Günlük Rapor":
-                    if not tum_tarihler:
-                        st.info("Henüz hiçbir tarihe ait veri yok.")
-                    else:
-                        varsayilan_indeks = (
-                            tum_tarihler.index(bugun_str) if bugun_str in tum_tarihler else 0
-                        )
-                        secilen_tarih = st.selectbox(
-                            "Hangi günün raporunu görmek istersin?",
-                            tum_tarihler,
-                            index=varsayilan_indeks,
-                            format_func=lambda t: f"{t}  —  {gun_adi(t)}",
-                            key="gunluk_rapor_tarih_secimi",
-                        )
-
-                        on_gun = df_on[df_on["Tarih"] == secilen_tarih] if not df_on.empty else pd.DataFrame()
-                        son_gun = df_son[df_son["Tarih"] == secilen_tarih] if not df_son.empty else pd.DataFrame()
-                        oneri_gun = df_oneri[df_oneri["Tarih"] == secilen_tarih] if not df_oneri.empty else pd.DataFrame()
-
-                        st.markdown(f"## {secilen_tarih} — {gun_adi(secilen_tarih)}")
-
-                        st.markdown("#### 📅 Ön Oylama Sonucu")
-                        if on_gun.empty:
-                            st.info("Bu gün için ön oylama verisi yok.")
-                        else:
-                            iyi = (on_gun["Degerlendirme"] == "İyi").sum()
-                            kotu = (on_gun["Degerlendirme"] == "Kötü").sum()
-                            toplam = len(on_gun)
-                            oran = (iyi / toplam * 100) if toplam else 0
-                            k1, k2, k3 = st.columns(3)
-                            k1.metric("Toplam Oy", toplam)
-                            k2.metric("👍 İyi", int(iyi))
-                            k3.metric("👎 Kötü", int(kotu))
-                            st.progress(oran / 100, text=f"İyi oranı: %{oran:.0f}")
-
-                        st.divider()
-                        st.markdown("#### ✅ Yemek Sonrası Değerlendirme")
-                        if son_gun.empty:
-                            st.info("Bu gün için değerlendirme verisi yok.")
-                        else:
-                            pivot_gun = son_gun.pivot_table(
-                                index=["Kalem", "UrunAdi"], columns="Degerlendirme",
-                                values="Tarih", aggfunc="count", fill_value=0,
-                            )
-                            for sutun in ["Güzel", "Orta", "Kötü"]:
-                                if sutun not in pivot_gun.columns:
-                                    pivot_gun[sutun] = 0
-                            pivot_gun = pivot_gun[["Güzel", "Orta", "Kötü"]]
-                            st.dataframe(pivot_gun, use_container_width=True)
-
-                            kotuler_gun = son_gun[son_gun["Degerlendirme"] == "Kötü"]
-                            if not kotuler_gun.empty:
-                                st.markdown("**⚠️ Kötü Değerlendirmeler:**")
-                                st.dataframe(
-                                    kotuler_gun[["Kalem", "UrunAdi", "Aciklama"]],
-                                    use_container_width=True,
-                                    hide_index=True,
-                                )
-                            else:
-                                st.success("Bu gün kötü olarak işaretlenen ürün yok.")
-
-                        st.divider()
-                        st.markdown("#### 💡 Öneri / Şikâyetler")
-                        if oneri_gun.empty:
-                            st.info("Bu gün için öneri/şikâyet yok.")
-                        else:
-                            st.dataframe(
-                                oneri_gun[["Oneri"]], use_container_width=True, hide_index=True
-                            )
-
-                        st.divider()
-                        gunluk_excel = excel_olustur({
-                            "OnOylama": on_gun,
-                            "Degerlendirme": son_gun,
-                            "OneriSikayet": oneri_gun,
-                        })
-                        st.download_button(
-                            "⬇️ Bu Günün Raporunu Excel Olarak İndir",
-                            data=gunluk_excel,
-                            file_name=f"gunluk_rapor_{secilen_tarih.replace('.', '_')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        )
-
-                # =====================================================
-                # AYLIK / GENEL ÖZET — tüm zamanların toplu görünümü
-                # =====================================================
+                st.markdown("### 📈 Ön Oylama Trend (Zaman İçinde İyi Oranı)")
+                if not df_on.empty:
+                    on_ort = df_on.groupby("Tarih")["Degerlendirme"].apply(
+                        lambda x: (x == "İyi").mean() * 100
+                    )
+                    on_ort.index = pd.to_datetime(on_ort.index, format=TARIH_FORMAT, errors="coerce")
+                    st.line_chart(on_ort.sort_index())
                 else:
-                    st.markdown("### 📊 Genel Özet")
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("Ön Oylama Sayısı", len(df_on))
-                    iyi_orani = (
-                        (df_on["Degerlendirme"] == "İyi").mean() * 100 if not df_on.empty else 0
+                    st.info("Henüz ön oylama verisi yok.")
+
+                st.divider()
+                st.markdown("### 🍽️ Ürün Bazında Dağılım (Yemek Sonrası)")
+                if df_son.empty:
+                    st.info("Henüz ürün değerlendirmesi yok.")
+                else:
+                    pivot = df_son.pivot_table(
+                        index="Kalem", columns="Degerlendirme", values="Tarih",
+                        aggfunc="count", fill_value=0,
                     )
-                    m2.metric("Ön Oylama İyi Oranı", f"%{iyi_orani:.0f}" if not df_on.empty else "—")
-                    m3.metric("Toplam Ürün Değerlendirmesi", len(df_son))
-                    kotu_orani = (
-                        (df_son["Degerlendirme"] == "Kötü").mean() * 100 if not df_son.empty else 0
-                    )
-                    m4.metric("Kötü Oranı", f"%{kotu_orani:.0f}" if not df_son.empty else "—")
+                    for sutun in ["Güzel", "Orta", "Kötü"]:
+                        if sutun not in pivot.columns:
+                            pivot[sutun] = 0
+                    pivot = pivot[["Güzel", "Orta", "Kötü"]]
+                    st.bar_chart(pivot)
 
                     st.divider()
-                    st.markdown("### 📈 Ön Oylama Trend (Zaman İçinde İyi Oranı)")
-                    if not df_on.empty:
-                        on_ort = df_on.groupby("Tarih")["Degerlendirme"].apply(
-                            lambda x: (x == "İyi").mean() * 100
-                        )
-                        on_ort.index = pd.to_datetime(on_ort.index, format=TARIH_FORMAT, errors="coerce")
-                        st.line_chart(on_ort.sort_index())
-                    else:
-                        st.info("Henüz ön oylama verisi yok.")
-
-                    st.divider()
-                    st.markdown("### 🍽️ Ürün Bazında Dağılım (Tüm Zamanlar)")
-                    if df_son.empty:
-                        st.info("Henüz ürün değerlendirmesi yok.")
-                    else:
-                        pivot = df_son.pivot_table(
-                            index="Kalem", columns="Degerlendirme", values="Tarih",
-                            aggfunc="count", fill_value=0,
-                        )
-                        for sutun in ["Güzel", "Orta", "Kötü"]:
-                            if sutun not in pivot.columns:
-                                pivot[sutun] = 0
-                        pivot = pivot[["Güzel", "Orta", "Kötü"]]
-                        st.bar_chart(pivot)
-
-                        st.divider()
-                        st.markdown("### ⚠️ Kötü Değerlendirmeler ve Açıklamalar (Tüm Zamanlar)")
-                        kotuler = df_son[df_son["Degerlendirme"] == "Kötü"]
-                        if kotuler.empty:
-                            st.success("Kötü olarak işaretlenen ürün yok.")
-                        else:
-                            st.dataframe(
-                                kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]]
-                                .sort_values("Tarih", ascending=False),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
-
-                    st.divider()
-                    st.markdown("### 💡 Tüm Öneri / Şikâyetler")
-                    if df_oneri.empty:
-                        st.info("Henüz öneri yok.")
+                    st.markdown("### ⚠️ Kötü Değerlendirmeler ve Açıklamalar")
+                    kotuler = df_son[df_son["Degerlendirme"] == "Kötü"]
+                    if kotuler.empty:
+                        st.success("Kötü olarak işaretlenen ürün yok.")
                     else:
                         st.dataframe(
-                            df_oneri[["Tarih", "Oneri"]].sort_values("Tarih", ascending=False),
+                            kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]]
+                            .sort_values("Tarih", ascending=False),
                             use_container_width=True,
                             hide_index=True,
                         )
+                        csv_kotu = kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]].to_csv(
+                            index=False
+                        ).encode("utf-8-sig")
+                        st.download_button(
+                            "⬇️ Kötü Değerlendirmeleri CSV Olarak İndir",
+                            data=csv_kotu,
+                            file_name=f"kotu_degerlendirmeler_{simdi_tr().strftime('%d_%m_%Y')}.csv",
+                            mime="text/csv",
+                        )
 
-                    st.divider()
-                    st.markdown("### ⬇️ Tüm Verileri Excel Olarak İndir")
-                    st.caption("OnOylama, Değerlendirme, Öneri/Şikâyet ve Ziyaretçi verilerinin tamamı, ayrı sayfalar hâlinde tek bir Excel dosyasında.")
-                    tum_excel = excel_olustur({
-                        "OnOylama": df_on,
-                        "SonDegerlendirme": df_son,
-                        "MenuOneri": df_oneri,
-                        "Ziyaretler": df_ziyaret,
-                    })
-                    st.download_button(
-                        "⬇️ Tüm Raporu Excel Olarak İndir",
-                        data=tum_excel,
-                        file_name=f"tum_rapor_{simdi_tr().strftime('%d_%m_%Y')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                st.divider()
+                st.markdown("### 💡 Menü Önerileri")
+                if df_oneri.empty:
+                    st.info("Henüz öneri yok.")
+                else:
+                    st.dataframe(
+                        df_oneri[["Tarih", "Oneri"]].sort_values("Tarih", ascending=False),
+                        use_container_width=True,
                     )
+
+                st.divider()
+                st.markdown("### 📧 Günlük Raporu Mail Gönder")
+                gonderilecek_tarih = st.date_input(
+                    "Hangi günün raporu gönderilsin?",
+                    value=simdi_tr().date(),
+                    format="DD.MM.YYYY",
+                    key="mail_tarih_secimi",
+                )
+                gonderilecek_tarih_str = gonderilecek_tarih.strftime(TARIH_FORMAT)
+
+                if st.button("📧 Bu Günün Raporunu Mail Gönder"):
+                    try:
+                        govde = gunluk_ozet_html(gonderilecek_tarih_str, df_on, df_son, df_oneri)
+                        mail_gonder(
+                            f"🍽️ Günlük Yemek Raporu — {gonderilecek_tarih_str}", govde
+                        )
+                        st.success("Rapor e-posta ile gönderildi!")
+                    except Exception as e:
+                        st.error(f"Mail gönderilirken hata oluştu: {e}")
 
                 st.divider()
                 if st.button("🔄 Verileri Yenile"):
