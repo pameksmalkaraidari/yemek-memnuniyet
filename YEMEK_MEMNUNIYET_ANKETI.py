@@ -99,11 +99,33 @@ def mail_gonder(konu: str, govde_html: str):
             sunucu.sendmail(gonderen, aliciler, mesaj.as_string())
 
 
-def gunluk_ozet_html(tarih_str: str, df_on: pd.DataFrame, df_son: pd.DataFrame, df_oneri: pd.DataFrame) -> str:
-    """Belirtilen tarih için ön oylama, ürün değerlendirmesi ve öneri
-    verilerinden sade bir HTML e-posta gövdesi üretir."""
+def gunluk_ozet_html(
+    tarih_str: str,
+    df_on: pd.DataFrame,
+    df_son: pd.DataFrame,
+    df_oneri: pd.DataFrame,
+    df_menu: pd.DataFrame = None,
+) -> str:
+    """Belirtilen tarih için o günün menüsü, ön oylama, ürün değerlendirmesi
+    ve öneri verilerinden sade bir HTML e-posta gövdesi üretir."""
     gun = gun_adi(tarih_str)
     parcalar = [f"<h2>🍽️ Günlük Yemek Raporu — {tarih_str} {gun}</h2>"]
+
+    # O günün menüsü (varsa) — hem ön oylama hem de değerlendirme
+    # bölümlerinde hangi yemeklerden bahsedildiğini anlamak için üstte
+    # tek seferde gösteriliyor.
+    menu_satiri = None
+    if df_menu is not None and not df_menu.empty and "Tarih" in df_menu.columns:
+        eslesen_menu = df_menu[df_menu["Tarih"] == tarih_str]
+        if not eslesen_menu.empty:
+            menu_satiri = eslesen_menu.iloc[0]
+            menu_ogeleri = [
+                f"{kolon}: {menu_satiri[kolon]}"
+                for kolon in df_menu.columns
+                if kolon != "Tarih" and str(menu_satiri[kolon]).strip()
+            ]
+            if menu_ogeleri:
+                parcalar.append("<p><b>🍲 Günün Menüsü:</b> " + " · ".join(menu_ogeleri) + "</p>")
 
     # Ön oylama özeti
     on_bugun = df_on[df_on["Tarih"] == tarih_str] if not df_on.empty and "Tarih" in df_on.columns else pd.DataFrame()
@@ -119,20 +141,29 @@ def gunluk_ozet_html(tarih_str: str, df_on: pd.DataFrame, df_son: pd.DataFrame, 
             f"(İyi oranı: %{oran:.0f})</p>"
         )
 
-    # Ürün bazlı değerlendirme özeti
+    # Ürün bazlı değerlendirme özeti — kategori (Çorba/Ana Yemek gibi)
+    # yerine gerçek yemek adına (UrunAdi) göre gruplanıyor, böylece
+    # rapor "Çorba: 4 güzel" yerine "Mercimek Çorbası: 4 güzel" gösteriyor.
     son_bugun = df_son[df_son["Tarih"] == tarih_str] if not df_son.empty and "Tarih" in df_son.columns else pd.DataFrame()
     if son_bugun.empty:
         parcalar.append("<p><b>Yemek Sonrası Değerlendirme:</b> Bugün için değerlendirme verisi yok.</p>")
     else:
         son_bugun = son_bugun.copy()
         son_bugun["_kategori"] = son_bugun["Degerlendirme"].apply(puan_kategorisi)
+        son_bugun["_urun_etiketi"] = son_bugun.apply(
+            lambda satir: f"{satir['UrunAdi']} ({satir['Kalem']})"
+            if str(satir.get("UrunAdi", "")).strip()
+            else satir["Kalem"],
+            axis=1,
+        )
         pivot = son_bugun.pivot_table(
-            index="Kalem", columns="_kategori", values="Tarih", aggfunc="count", fill_value=0
+            index="_urun_etiketi", columns="_kategori", values="Tarih", aggfunc="count", fill_value=0
         )
         for sutun in ["Güzel", "Orta", "Kötü"]:
             if sutun not in pivot.columns:
                 pivot[sutun] = 0
         pivot = pivot[["Güzel", "Orta", "Kötü"]]
+        pivot.index.name = "Yemek"
         parcalar.append("<p><b>Yemek Sonrası Değerlendirme (1-5 puan, 1-2: Kötü, 3: Orta, 4-5: Güzel):</b></p>")
         parcalar.append(pivot.to_html(border=1))
 
@@ -928,7 +959,7 @@ if yonetici_erisimi:
 
                 if st.button("📧 Bu Günün Raporunu Mail Gönder"):
                     try:
-                        govde = gunluk_ozet_html(gonderilecek_tarih_str, df_on, df_son, df_oneri)
+                        govde = gunluk_ozet_html(gonderilecek_tarih_str, df_on, df_son, df_oneri, df_menu)
                         mail_gonder(
                             f"🍽️ Günlük Yemek Raporu — {gonderilecek_tarih_str}", govde
                         )
