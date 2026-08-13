@@ -123,21 +123,23 @@ def gunluk_ozet_html(tarih_str: str, df_on: pd.DataFrame, df_son: pd.DataFrame, 
     if son_bugun.empty:
         parcalar.append("<p><b>Yemek Sonrası Değerlendirme:</b> Bugün için değerlendirme verisi yok.</p>")
     else:
+        son_bugun = son_bugun.copy()
+        son_bugun["_kategori"] = son_bugun["Degerlendirme"].apply(puan_kategorisi)
         pivot = son_bugun.pivot_table(
-            index="Kalem", columns="Degerlendirme", values="Tarih", aggfunc="count", fill_value=0
+            index="Kalem", columns="_kategori", values="Tarih", aggfunc="count", fill_value=0
         )
         for sutun in ["Güzel", "Orta", "Kötü"]:
             if sutun not in pivot.columns:
                 pivot[sutun] = 0
         pivot = pivot[["Güzel", "Orta", "Kötü"]]
-        parcalar.append("<p><b>Yemek Sonrası Değerlendirme:</b></p>")
+        parcalar.append("<p><b>Yemek Sonrası Değerlendirme (1-5 puan, 1-2: Kötü, 3: Orta, 4-5: Güzel):</b></p>")
         parcalar.append(pivot.to_html(border=1))
 
-        kotuler = son_bugun[son_bugun["Degerlendirme"] == "Kötü"]
+        kotuler = son_bugun[son_bugun["_kategori"] == "Kötü"]
         if not kotuler.empty:
-            parcalar.append("<p><b>⚠️ Kötü Değerlendirmeler:</b></p>")
+            parcalar.append("<p><b>⚠️ Kötü Değerlendirmeler (1-2 puan):</b></p>")
             parcalar.append(
-                kotuler[["Kalem", "UrunAdi", "Aciklama"]].to_html(index=False, border=1)
+                kotuler[["Kalem", "UrunAdi", "Degerlendirme", "Aciklama"]].to_html(index=False, border=1)
             )
 
     # Öneriler
@@ -295,6 +297,20 @@ def gun_adi(tarih_str: str) -> str:
         return GUN_ADLARI_TR[tarih.weekday()]
     except (ValueError, TypeError):
         return ""
+
+
+def puan_kategorisi(puan) -> str:
+    """1-5 arası sayısal puanı raporlarda kullanılan Kötü/Orta/Güzel
+    kategorisine çevirir. 1-2: Kötü, 3: Orta, 4-5: Güzel."""
+    try:
+        p = int(puan)
+    except (ValueError, TypeError):
+        return "Orta"
+    if p <= 2:
+        return "Kötü"
+    if p == 3:
+        return "Orta"
+    return "Güzel"
 
 
 # Bağlantıyı kur
@@ -494,7 +510,7 @@ with tab_degerlendirme:
             if k != "Tarih" and str(gunun_menusu[k]).strip()
         ]
 
-        st.markdown("Her ürünü ayrı ayrı değerlendir. **Kötü** olduğunu düşünüyorsan nedenini bize açıklar mısın? Bu bizim sorunu düzeltmemize yardımcı olacaktır.")
+        st.markdown("Her ürünü ayrı ayrı **1 (çok kötü) - 5 (çok iyi)** arasında puanla. **1** veya **2** verirsen nedenini bize açıklar mısın? Bu bizim sorunu düzeltmemize yardımcı olacaktır.")
         st.divider()
 
         degerlendirmeler = {}
@@ -505,15 +521,15 @@ with tab_degerlendirme:
             st.markdown(f"**{kolon}: {urun_adi}**")
             secim = st.radio(
                 f"{kolon} nasıldı?",
-                ["Güzel", "Orta", "Kötü"],
-                index=1,
+                [1, 2, 3, 4, 5],
+                index=3,
                 horizontal=True,
                 key=f"degerlendirme_{bugun_str}_{kolon}",
                 label_visibility="collapsed",
             )
             degerlendirmeler[kolon] = secim
 
-            if secim == "Kötü":
+            if secim in (1, 2):
                 aciklama = st.text_input(
                     f"{kolon} için neden beğenmedin?",
                     key=f"aciklama_{bugun_str}_{kolon}",
@@ -525,11 +541,11 @@ with tab_degerlendirme:
 
         if st.button("Değerlendirmeyi Gönder", key="son_degerlendirme_gonder"):
             eksik_aciklama_var = any(
-                degerlendirmeler[k] == "Kötü" and not aciklamalar.get(k, "").strip()
+                degerlendirmeler[k] in (1, 2) and not aciklamalar.get(k, "").strip()
                 for k in urun_kolonlari
             )
             if eksik_aciklama_var:
-                st.warning("Kötü olarak işaretlediğin ürün(ler) için lütfen kısa bir açıklama yaz.")
+                st.warning("1 veya 2 puan verdiğin ürün(ler) için lütfen kısa bir açıklama yaz.")
             else:
                 try:
                     zaman = simdi_tr().strftime("%d.%m.%Y %H:%M:%S")
@@ -766,6 +782,11 @@ if yonetici_erisimi:
             if df_on.empty and df_son.empty:
                 st.info("Henüz hiç oylama verisi yok.")
             else:
+                if not df_son.empty:
+                    df_son = df_son.copy()
+                    df_son["_puan_sayi"] = pd.to_numeric(df_son["Degerlendirme"], errors="coerce")
+                    df_son["_kategori"] = df_son["Degerlendirme"].apply(puan_kategorisi)
+
                 st.markdown("### 📊 Özet")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Ön Oylama Sayısı", len(df_on))
@@ -773,11 +794,14 @@ if yonetici_erisimi:
                     (df_on["Degerlendirme"] == "İyi").mean() * 100 if not df_on.empty else 0
                 )
                 m2.metric("Ön Oylama İyi Oranı", f"%{iyi_orani:.0f}" if not df_on.empty else "—")
-                m3.metric("Toplam Ürün Değerlendirmesi", len(df_son))
-                kotu_orani = (
-                    (df_son["Degerlendirme"] == "Kötü").mean() * 100 if not df_son.empty else 0
+                m3.metric(
+                    "Ortalama Puan (1-5)",
+                    f"{df_son['_puan_sayi'].mean():.2f}" if not df_son.empty else "—",
                 )
-                m4.metric("Kötü Oranı", f"%{kotu_orani:.0f}" if not df_son.empty else "—")
+                kotu_orani = (
+                    (df_son["_kategori"] == "Kötü").mean() * 100 if not df_son.empty else 0
+                )
+                m4.metric("Kötü Oranı (1-2 Puan)", f"%{kotu_orani:.0f}" if not df_son.empty else "—")
 
                 st.divider()
                 st.markdown("### 📈 Ön Oylama Trend (Zaman İçinde İyi Oranı)")
@@ -791,12 +815,12 @@ if yonetici_erisimi:
                     st.info("Henüz ön oylama verisi yok.")
 
                 st.divider()
-                st.markdown("### 🍽️ Ürün Bazında Dağılım (Yemek Sonrası)")
+                st.markdown("### 🍽️ Ürün Bazında Dağılım (Yemek Sonrası, 1-2: Kötü, 3: Orta, 4-5: Güzel)")
                 if df_son.empty:
                     st.info("Henüz ürün değerlendirmesi yok.")
                 else:
                     pivot = df_son.pivot_table(
-                        index="Kalem", columns="Degerlendirme", values="Tarih",
+                        index="Kalem", columns="_kategori", values="Tarih",
                         aggfunc="count", fill_value=0,
                     )
                     for sutun in ["Güzel", "Orta", "Kötü"]:
@@ -806,18 +830,18 @@ if yonetici_erisimi:
                     st.bar_chart(pivot)
 
                     st.divider()
-                    st.markdown("### ⚠️ Kötü Değerlendirmeler ve Açıklamalar")
-                    kotuler = df_son[df_son["Degerlendirme"] == "Kötü"]
+                    st.markdown("### ⚠️ Kötü Değerlendirmeler ve Açıklamalar (1-2 Puan)")
+                    kotuler = df_son[df_son["_kategori"] == "Kötü"]
                     if kotuler.empty:
-                        st.success("Kötü olarak işaretlenen ürün yok.")
+                        st.success("1-2 puan verilen ürün yok.")
                     else:
                         st.dataframe(
-                            kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]]
+                            kotuler[["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama"]]
                             .sort_values("Tarih", ascending=False),
                             use_container_width=True,
                             hide_index=True,
                         )
-                        csv_kotu = kotuler[["Tarih", "Kalem", "UrunAdi", "Aciklama"]].to_csv(
+                        csv_kotu = kotuler[["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama"]].to_csv(
                             index=False
                         ).encode("utf-8-sig")
                         st.download_button(
