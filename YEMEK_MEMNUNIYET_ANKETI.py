@@ -545,15 +545,15 @@ df_menu = df_oku(ws_menu, WS_MENU)
 gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = simdi_tr().strftime(TARIH_FORMAT)
 
-tab_degerlendirme = st.container()
+secim = st.radio(
+    "Gitmek istediğin bölümü seç",
+    ["✅ Günün Menüsünü Değerlendirme", "📅 Aylık Menü Oylama", "💡 Dilek-Şikâyet-Öneri"],
+    key="ana_bolum_secimi",
+)
 st.divider()
-st.subheader("📅 Aylık Menü Oylama")
-tab_on_oylama = st.container()
-st.divider()
-tab3 = st.container()
 
 # --- TAB 1: Aylık Menü & Ön Oylama ---
-with tab_on_oylama:
+if secim == "📅 Aylık Menü Oylama":
     if df_menu.empty:
         st.info("Sisteme henüz bir menü yüklenmemiş.")
     else:
@@ -634,7 +634,7 @@ with tab_on_oylama:
 
 
 # --- TAB 2: Yemek Sonrası Değerlendirme ---
-with tab_degerlendirme:
+if secim == "✅ Günün Menüsünü Değerlendirme":
     st.subheader(f"Bugünkü Yemekler Nasıldı? — {bugun_str}")
     st.markdown(f'<div class="gun-adi-etiket">📆 {gun_adi(bugun_str)}</div>', unsafe_allow_html=True)
 
@@ -708,7 +708,7 @@ with tab_degerlendirme:
                     st.error(f"Kayıt sırasında hata oluştu: {e}")
 
 # --- TAB 3: Menü Önerisi ---
-with tab3:
+if secim == "💡 Dilek-Şikâyet-Öneri":
     st.subheader("Menü Önerin Var mı? Veya Herhangi bir konuda şikâyetin var mı?")
 
     cihazda_oneri_yapilan = cihazda_oylanan_gunleri_oku(COOKIE_ONERI)
