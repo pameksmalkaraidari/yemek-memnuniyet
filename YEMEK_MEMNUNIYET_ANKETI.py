@@ -36,6 +36,7 @@ WS_MENU = "GunlukMenu"
 WS_ON = "OnOylama"
 WS_SON = "SonDegerlendirme"
 WS_ONERI = "MenuOneri"
+WS_ZIYARET = "Ziyaretler"
 
 TARIH_FORMAT = "%d.%m.%Y"
 TR_TZ = ZoneInfo("Europe/Istanbul")
@@ -48,6 +49,7 @@ TR_TZ = ZoneInfo("Europe/Istanbul")
 COOKIE_ON_OYLAMA = "yemek_on_oylanan_gunler"
 COOKIE_SON_DEGERLENDIRME = "yemek_son_degerlendirilen_gunler"
 COOKIE_ONERI = "yemek_oneri_yapilan_gunler"
+COOKIE_ZIYARET = "yemek_ziyaret_gunler"
 COOKIE_GECERLILIK_GUN = 120
 
 
@@ -58,11 +60,22 @@ def simdi_tr() -> datetime:
     return datetime.now(TR_TZ)
 
 
+def _gune_cevir(deger):
+    """pd.Timestamp / datetime / date karışık gelebilen bir değeri saf
+    datetime.date nesnesine çevirir (karşılaştırmalarda tip uyuşmazlığını
+    önlemek için)."""
+    if hasattr(deger, "date") and callable(deger.date):
+        return deger.date()
+    return deger
+
+
 def tarih_araligina_filtrele(df: pd.DataFrame, baslangic, bitis) -> pd.DataFrame:
     """df'in 'Tarih' sütununu (DD.MM.YYYY metni) ayrıştırıp [baslangic, bitis]
     (date nesneleri, iki uç dahil) aralığındaki satırları döndürür."""
     if df is None or df.empty or "Tarih" not in df.columns:
         return pd.DataFrame(columns=(df.columns if df is not None else []))
+    baslangic = _gune_cevir(baslangic)
+    bitis = _gune_cevir(bitis)
     d = df.copy()
     d["_t"] = pd.to_datetime(d["Tarih"], format=TARIH_FORMAT, errors="coerce").dt.date
     d = d[(d["_t"] >= baslangic) & (d["_t"] <= bitis)]
@@ -426,6 +439,7 @@ try:
     ws_on = worksheet_al(spreadsheet, WS_ON, ["Tarih", "Degerlendirme", "KayitZamani"])
     ws_son = worksheet_al(spreadsheet, WS_SON, ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"])
     ws_oneri = worksheet_al(spreadsheet, WS_ONERI, ["Tarih", "Oneri", "KayitZamani"])
+    ws_ziyaret = worksheet_al(spreadsheet, WS_ZIYARET, ["Tarih", "KayitZamani"])
 except Exception as e:
     st.error(
         "⚠️ Google Sheets ile iletişimde bir sorun oluştu. Bu genellikle Google'ın "
@@ -544,6 +558,21 @@ st.divider()
 df_menu = df_oku(ws_menu, WS_MENU)
 gunun_menusu = bugunun_menusu(df_menu)
 bugun_str = simdi_tr().strftime(TARIH_FORMAT)
+
+# --- Ziyaretçi sayacı: bu cihaz bugün daha önce sayılmadıysa sessizce
+# bir satır ekler. Diğer form kısıtlamalarıyla aynı cihaz+gün mantığını
+# kullanır; kullanıcıya hiçbir şey göstermez, sayaç sadece admin panelinde
+# görünür. Sayaç arızalanırsa uygulamanın geri kalanını etkilememesi için
+# hata sessizce yutulur.
+if not cihaz_bugun_kullandi_mi(COOKIE_ZIYARET, bugun_str):
+    try:
+        satir_ekle(ws_ziyaret, [bugun_str, simdi_tr().strftime("%d.%m.%Y %H:%M:%S")])
+        cihazi_bugun_icin_isaretle(
+            COOKIE_ZIYARET, cihazda_oylanan_gunleri_oku(COOKIE_ZIYARET), bugun_str
+        )
+        df_oku.clear()
+    except Exception:
+        pass
 
 secim = st.radio(
     "Gitmek istediğin bölümü seç",
@@ -860,6 +889,7 @@ if yonetici_erisimi:
                             ["Tarih", "Kalem", "UrunAdi", "Degerlendirme", "Aciklama", "KayitZamani"],
                         )
                         _basliklari_onar(ws_oneri, ["Tarih", "Oneri", "KayitZamani"])
+                        _basliklari_onar(ws_ziyaret, ["Tarih", "KayitZamani"])
                         df_oku.clear()
                         st.success("Başlıklar onarıldı! Sayfa yenileniyor...")
                         st.rerun()
@@ -926,6 +956,33 @@ if yonetici_erisimi:
             df_oneri = beklenen_sutunlari_garanti_et(
                 df_oku(ws_oneri, WS_ONERI), ["Tarih", "Oneri", "KayitZamani"], WS_ONERI
             )
+            df_ziyaret = beklenen_sutunlari_garanti_et(
+                df_oku(ws_ziyaret, WS_ZIYARET), ["Tarih", "KayitZamani"], WS_ZIYARET
+            )
+
+            st.markdown("### 👥 Ziyaretçi Sayacı")
+            st.caption("Aynı cihaz bir gün içinde sadece 1 kez sayılır — yani bu, benzersiz kullanıcı sayısına en yakın tahmin.")
+
+            bugun_obj = simdi_tr().date()
+            hafta_baslangic_obj = _gune_cevir(bugun_obj - pd.Timedelta(days=bugun_obj.weekday()))
+            hafta_bitis_obj = _gune_cevir(hafta_baslangic_obj + pd.Timedelta(days=6))
+            ay_baslangic_obj = bugun_obj.replace(day=1)
+            ay_bitis_obj = _gune_cevir(
+                (ay_baslangic_obj + pd.Timedelta(days=32)).replace(day=1) - pd.Timedelta(days=1)
+            )
+
+            zv1, zv2, zv3 = st.columns(3)
+            zv1.metric("Bugün", len(tarih_araligina_filtrele(df_ziyaret, bugun_obj, bugun_obj)))
+            zv2.metric("Bu Hafta", len(tarih_araligina_filtrele(df_ziyaret, hafta_baslangic_obj, hafta_bitis_obj)))
+            zv3.metric("Bu Ay", len(tarih_araligina_filtrele(df_ziyaret, ay_baslangic_obj, ay_bitis_obj)))
+
+            if not df_ziyaret.empty:
+                with st.expander("📈 Günlük Ziyaretçi Trendi"):
+                    gunluk_ziyaret = df_ziyaret.groupby("Tarih").size()
+                    gunluk_ziyaret.index = pd.to_datetime(gunluk_ziyaret.index, format=TARIH_FORMAT, errors="coerce")
+                    st.line_chart(gunluk_ziyaret.sort_index())
+
+            st.divider()
 
             if df_on.empty and df_son.empty:
                 st.info("Henüz hiç oylama verisi yok.")
@@ -1037,8 +1094,8 @@ if yonetici_erisimi:
                         format="DD.MM.YYYY",
                         key="excel_rapor_hafta_secimi",
                     )
-                    rapor_baslangic = referans_gun - pd.Timedelta(days=referans_gun.weekday())
-                    rapor_bitis = rapor_baslangic + pd.Timedelta(days=6)
+                    rapor_baslangic = _gune_cevir(referans_gun - pd.Timedelta(days=referans_gun.weekday()))
+                    rapor_bitis = _gune_cevir(rapor_baslangic + pd.Timedelta(days=6))
                     st.caption(f"Seçilen hafta: {rapor_baslangic.strftime('%d.%m.%Y')} – {rapor_bitis.strftime('%d.%m.%Y')} (Pazartesi–Pazar)")
 
                 elif rapor_araligi_turu == "Aylık":
@@ -1049,8 +1106,8 @@ if yonetici_erisimi:
                         key="excel_rapor_ay_secimi",
                     )
                     rapor_baslangic = referans_gun.replace(day=1)
-                    sonraki_ay = (rapor_baslangic + pd.Timedelta(days=32)).replace(day=1)
-                    rapor_bitis = sonraki_ay - pd.Timedelta(days=1)
+                    sonraki_ay = _gune_cevir((rapor_baslangic + pd.Timedelta(days=32)).replace(day=1))
+                    rapor_bitis = _gune_cevir(sonraki_ay - pd.Timedelta(days=1))
                     st.caption(f"Seçilen ay: {rapor_baslangic.strftime('%d.%m.%Y')} – {rapor_bitis.strftime('%d.%m.%Y')}")
 
                 else:  # Özel Tarih Aralığı
